@@ -1,0 +1,63 @@
+# === Secrets / Environment ===
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+*.so
+
+# === Virtual Environments ===
+.venv/
+venv/
+env/
+ENV/
+
+# === uv ===
+.uv/
+uv-*.lock.bak
+
+# === Testing ===
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+*.log
+/tmp/
+
+# === IDEs ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Temp / scratch files ===
+*.tmp
+tmp_*.txt
+scratch.*
