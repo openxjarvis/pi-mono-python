@@ -59,9 +59,6 @@ def build_system_prompt(
                 prompt_parts.append(f"## {context_file}\n\n{content}")
             break  # Only include first found
 
-    if include_cwd:
-        prompt_parts.append(f"The current working directory is: {cwd}")
-
     return "\n\n".join(p for p in prompt_parts if p)
 
 
@@ -69,7 +66,7 @@ def _default_system_prompt(cwd: str, selected_tools: list[str] | None = None) ->
     """Default system prompt aligned with TypeScript coding-agent guidance."""
     tool_descriptions = {
         "read": "Read file contents",
-        "bash": "Execute bash commands (ls, rg, python, tests, etc.)",
+        "bash": "Execute any shell command: run Python/Node/shell scripts, compile, test, install packages, etc.",
         "edit": "Make surgical edits to files (find exact text and replace)",
         "write": "Create or overwrite files",
         "grep": "Search file contents for patterns (respects .gitignore)",
@@ -100,14 +97,16 @@ def _default_system_prompt(cwd: str, selected_tools: list[str] | None = None) ->
     if has_write:
         guidelines.append("Use write for new files or complete rewrites.")
     if has_edit or has_write:
-        guidelines.append("After code changes, run relevant tests or checks when possible.")
+        guidelines.append("After writing or editing code, run it with bash to verify it works.")
+    if has_bash:
+        guidelines.append(
+            "When the user asks to run, execute, or test something, ALWAYS use the bash tool to do it immediately. "
+            "Never tell the user to run it themselves."
+        )
     guidelines.append("Be concise and action-oriented.")
     guidelines.append("Show clear file paths when reporting changes.")
     guidelines.append(
-        "When a task requires filesystem or command execution, use tools instead of claiming you cannot run commands."
-    )
-    guidelines.append(
-        "Do not state permission limitations unless a tool call actually returns a permission/access error."
+        "Do not claim you cannot execute commands. If bash is available, use it."
     )
     guidelines_block = "\n".join(f"- {g}" for g in guidelines)
 

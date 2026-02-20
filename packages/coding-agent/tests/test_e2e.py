@@ -124,7 +124,7 @@ async def test_e2e_system_prompt_includes_cwd():
         # TS-parity: default prompt should include explicit tool section/guidelines.
         assert "Available tools:" in prompt
         assert "- read: Read file contents" in prompt
-        assert "- bash: Execute bash commands" in prompt
+        assert "- bash:" in prompt
         assert "Guidelines:" in prompt
 
 
