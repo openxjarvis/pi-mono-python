@@ -1,118 +1,131 @@
 # pi-mono-python
 
-Python mirror of the [pi-mono](../pi-mono) TypeScript monorepo.
-
-Mirrors four packages with aligned code, logic, and folder structure:
+Python port of the [pi-mono](../pi-mono) TypeScript monorepo — four packages with aligned code, logic, algorithms, and folder structure.
 
 | TypeScript | Python | Description |
 |---|---|---|
-| `@mariozechner/pi-ai` | `pi_ai` | Unified LLM API (Anthropic, OpenAI, Google, Bedrock) |
-| `@mariozechner/pi-agent-core` | `pi_agent` | Agent loop, state management, tool execution |
-| `@mariozechner/pi-coding-agent` | `pi_coding_agent` | Coding agent with tools: read, write, edit, bash, grep, find, ls |
+| `@mariozechner/pi-ai` | `pi_ai` | Unified LLM streaming layer (Google, Anthropic, OpenAI, Bedrock, …) |
+| `@mariozechner/pi-agent-core` | `pi_agent` | Agent loop, tool execution, state management |
+| `@mariozechner/pi-coding-agent` | `pi_coding_agent` | Coding agent CLI with file tools: read, write, edit, bash, grep, find, ls |
 | `@mariozechner/pi-tui` | `pi_tui` | Terminal UI library with differential rendering engine |
 
 ---
 
-## 前置条件 / Prerequisites
+## Requirements
 
-| 工具 | 最低版本 |
+| Tool | Version |
 |------|---------|
 | Python | 3.11+ |
-| `uv` | 最新版 |
+| [`uv`](https://docs.astral.sh/uv/) | latest |
 
 ```bash
-# 安装 uv（如果还没有）
+# Install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 ---
 
-## 快速开始 / Quick Start
+## Installation
 
 ```bash
-# 1. 进入项目目录
+git clone https://github.com/openxjarvis/pi-mono-python.git
 cd pi-mono-python
 
-# 2. 安装所有依赖（一次性安装全部 4 个子包）
+# Install all four packages and their dependencies in one step
 uv sync
-
-# 3. 配置 API Key（编辑 .env 文件）
-# GEMINI_API_KEY=your_key_here
-
-# 4. 启动 pi（交互 TUI 模式）```
-
----
-
-## 配置 API Key / Configure API Key
-
-编辑根目录的 `.env` 文件：
-
-```env
-# Google Gemini（默认 provider）
-GEMINI_API_KEY=your_key_here
-
-# 其他可选
-ANTHROPIC_API_KEY=
-OPENAI_API_KEY=
 ```
 
-`.env` 在运行时自动加载，**不要提交到 git**。
+---
+
+## Configuration
+
+Create or edit `.env` in the project root:
+
+```env
+# Google Gemini (default provider)
+GEMINI_API_KEY=your_key_here
+
+# Optional — add whichever providers you need
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+GOOGLE_API_KEY=        # alternative to GEMINI_API_KEY
+AWS_ACCESS_KEY_ID=     # for Bedrock
+AWS_SECRET_ACCESS_KEY=
+```
+
+> `.env` is loaded automatically at runtime. **Never commit it to git.**
 
 ---
 
-## 运行 `pi` CLI
+## Usage
 
-### 交互模式（默认，启动 TUI）
+### Interactive TUI (default)
 
 ```bash
 uv run --package pi-coding-agent pi
 ```
 
-进入全功能终端 UI：
+Launches the full-featured terminal UI:
 
-| 快捷键 | 功能 |
-|--------|------|
-| `Enter` | 发送消息 |
-| `Shift+Enter` | 输入框换行 |
-| `/` | 触发 slash command 补全 |
-| `@` | 文件路径补全 |
-| `Ctrl+C` / `Esc` | 退出 |
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message |
+| `Shift+Enter` | New line in input |
+| `/` | Slash command completion |
+| `@` | File path completion |
+| `Ctrl+P` | Cycle to next model |
+| `Ctrl+C` / `Esc` | Quit |
 
-### 非交互（一次性提问）
+**Slash commands** (type `/` to see completions):
+
+| Command | Description |
+|---------|-------------|
+| `/model <name>` | Switch model by name |
+| `/thinking <level>` | Set thinking level: `minimal` · `low` · `medium` · `high` · `xhigh` |
+| `/compact` | Compact conversation context |
+| `/session` | Show session statistics (tokens, cost) |
+| `/tools` | List active tools |
+
+---
+
+### Non-interactive (single prompt)
 
 ```bash
-uv run --package pi-coding-agent pi --print "用 Python 写一个快速排序"
+uv run --package pi-coding-agent pi --print "Write a quicksort in Python"
 ```
 
-### 指定模型
+Prints the agent's response to stdout and exits — useful for scripting.
+
+---
+
+### Specify a model
 
 ```bash
-# 使用 Gemini
+# By model ID
 uv run --package pi-coding-agent pi --model gemini-2.5-pro-preview
 
-# 明确指定 provider 和 model
+# By provider + model
 uv run --package pi-coding-agent pi --provider google --model gemini-2.0-flash
-```
 
-### 继续上次会话
-
-```bash
-uv run --package pi-coding-agent pi --continue
-```
-
-### 选择历史会话恢复
-
-```bash
-uv run --package pi-coding-agent pi --resume
-```
-
-### 查看所有可用模型
-
-```bash
+# List all available models
 uv run --package pi-coding-agent pi --list-models
 ```
 
-### 查看完整帮助
+---
+
+### Session management
+
+```bash
+# Resume the most recent session
+uv run --package pi-coding-agent pi --continue
+
+# Pick a previous session from a list
+uv run --package pi-coding-agent pi --resume
+```
+
+---
+
+### Full CLI reference
 
 ```bash
 uv run --package pi-coding-agent pi --help
@@ -120,107 +133,101 @@ uv run --package pi-coding-agent pi --help
 
 ---
 
-## 运行测试 / Run Tests
+## Running Tests
 
-### 全部测试（530 个）
+### All tests
 
 ```bash
 uv run pytest
 ```
 
-### 按包单独测试
+### Per-package
 
 ```bash
-# TUI 组件（135 个）
-uv run --package pi-tui pytest packages/tui/tests/ -v
-
-# AI 提供商
-uv run pytest packages/ai/tests/ -v
-
-# Agent 核心
-uv run pytest packages/agent/tests/ -v
-
-# Coding Agent（245 个）
-uv run pytest packages/coding-agent/tests/ -v
+uv run pytest packages/tui/tests/          # TUI components
+uv run pytest packages/ai/tests/           # AI providers
+uv run pytest packages/agent/tests/        # Agent core
+uv run pytest packages/coding-agent/tests/ # CLI + coding agent
 ```
 
-### 真实 Gemini API 测试（Live）
+### Live API tests (requires `GEMINI_API_KEY`)
 
 ```bash
-# 确保 .env 中 GEMINI_API_KEY 已填写
-uv run pytest packages/ai/tests/ -v --live
+uv run pytest packages/ai/tests/ --live -v
 
-# 或通过环境变量
+# Or via environment variable
 LIVE_TESTS=1 uv run pytest packages/ai/tests/ -v
 ```
 
-> 不加 `--live` 的测试全部使用 mock，不消耗 API 额度。
+> All tests run against mocks by default — no API key required, no quota consumed.
 
 ---
 
-## 项目结构 / Project Structure
+## Test Status
+
+| Package | Tests | Status |
+|---------|-------|--------|
+| `pi_tui` | 135 | ✅ passed |
+| `pi_ai` + `pi_agent` | 156 | ✅ passed (7 skipped = live-only) |
+| `pi_coding_agent` | 287 | ✅ passed |
+| **Total** | **578** | **✅ all passing** |
+
+---
+
+## Project Structure
 
 ```
 pi-mono-python/
-├── .env                              ← API Keys（勿提交 git）
-├── pyproject.toml                    ← uv workspace 根配置
-├── conftest.py                       ← 全局测试配置（加载 .env）
-├── packages/
-│   ├── ai/                           ← LLM 提供商层
-│   │   └── src/pi_ai/
-│   │       ├── providers/            ← google.py, openai.py, anthropic.py...
-│   │       └── stream.py             ← 统一流式输出
-│   ├── agent/                        ← 核心 Agent 逻辑
-│   │   └── src/pi_agent/
-│   │       ├── agent.py              ← Agent 主循环
-│   │       ├── tools/                ← 工具执行层
-│   │       └── session.py            ← 会话管理
-│   ├── coding-agent/                 ← CLI 入口 & 扩展系统
-│   │   └── src/pi_coding_agent/
-│   │       ├── cli.py                ← `pi` 命令入口
-│   │       ├── modes/interactive/    ← TUI 交互模式
-│   │       └── core/tools/           ← read, write, edit, bash, grep...
-│   └── tui/                          ← 终端 UI 库
-│       └── src/pi_tui/
-│           ├── components/           ← Editor, SelectList, Markdown...
-│           ├── tui.py                ← 差异渲染引擎
-│           └── keys.py               ← Kitty 键盘协议解析
+├── .env                          ← API keys (never commit)
+├── pyproject.toml                ← uv workspace root
+├── conftest.py                   ← global pytest config (.env loader)
+└── packages/
+    ├── ai/                       ← LLM provider layer
+    │   └── src/pi_ai/
+    │       ├── providers/        ← google.py, openai.py, anthropic.py, …
+    │       ├── stream.py         ← unified stream_simple() / complete_simple()
+    │       └── utils/            ← overflow detection, JSON parse, …
+    ├── agent/                    ← core agent loop
+    │   └── src/pi_agent/
+    │       ├── agent.py          ← main run loop
+    │       ├── tools/            ← tool registry & execution
+    │       └── session.py        ← session state
+    ├── coding-agent/             ← CLI entry point & extensions
+    │   └── src/pi_coding_agent/
+    │       ├── cli.py            ← `pi` command
+    │       ├── core/             ← AgentSession, system prompt, tools
+    │       └── modes/interactive/← TUI interactive mode
+    └── tui/                      ← terminal UI library
+        └── src/pi_tui/
+            ├── components/       ← Editor, SelectList, Markdown, …
+            ├── tui.py            ← differential rendering engine
+            └── keys.py           ← Kitty keyboard protocol parser
 ```
 
 ---
 
-## TypeScript → Python 映射
+## TypeScript → Python Mapping
 
 | TypeScript | Python |
 |---|---|
-| `interface X {}` | `class X(BaseModel):` 或 `@dataclass` |
+| `interface X {}` | `class X(BaseModel):` or `@dataclass` |
 | `type X = A \| B` | `X = Union[A, B]` |
 | `async function f()` | `async def f()` |
 | `AsyncIterable<T>` | `AsyncGenerator[T, None]` |
-| `AbortSignal` | `asyncio.Event`（取消令牌）|
+| `AbortSignal` | `asyncio.Event` (cancellation token) |
 | `EventEmitter` | `dict[str, list[Callable]]` |
 | TypeBox schema | `pydantic.BaseModel` |
 | `vitest` | `pytest` + `pytest-asyncio` |
 
 ---
 
-## 常见问题 / FAQ
+## FAQ
 
-| 问题 | 解决方案 |
-|------|---------|
-| `uv: command not found` | 运行安装脚本：`curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| `GEMINI_API_KEY not set` | 在 `.env` 文件中填入 key |
-| `ModuleNotFoundError: pi_tui` | 使用 `uv run --package pi-coding-agent pi` 而非直接 `python` |
-| TUI 显示乱码 | 确保终端支持 UTF-8，推荐 iTerm2 或 Warp |
-| 测试被跳过（skipped） | 加 `--live` 运行真实 API 测试 |
-
----
-
-## 测试状态 / Test Status
-
-| 包 | 测试数 | 状态 |
-|----|--------|------|
-| `pi_tui` | 135 | ✅ passed |
-| `pi_ai` + `pi_agent` | 150 | ✅ passed（7 skipped = live only）|
-| `pi_coding_agent` | 245 | ✅ passed |
-| **合计** | **530** | **✅ 全部通过** |
+| Problem | Solution |
+|---------|----------|
+| `uv: command not found` | Run the install script: `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| `GEMINI_API_KEY not set` | Add your key to `.env` |
+| `ModuleNotFoundError: pi_tui` | Use `uv run --package pi-coding-agent pi` instead of `python` directly |
+| TUI shows garbled characters | Ensure your terminal supports UTF-8 (iTerm2, Warp, or any modern terminal) |
+| Tests are skipped | Add `--live` to run real API tests |
+| `400 thought_signature` error | Upgrade to the latest version — this is fixed in the google provider |
