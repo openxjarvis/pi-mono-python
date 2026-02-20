@@ -68,12 +68,20 @@ def _build_contents(context: Context) -> list[Any]:
                 if isinstance(block, TextContent):
                     parts.append(gtypes.Part(text=block.text))
                 elif isinstance(block, ToolCall):
-                    parts.append(gtypes.Part(
-                        function_call=gtypes.FunctionCall(
+                    fc_kwargs: dict[str, Any] = {
+                        "function_call": gtypes.FunctionCall(
                             name=block.name,
                             args=block.arguments,
                         )
-                    ))
+                    }
+                    # Restore thought_signature (required when thinking mode was on)
+                    if block.thought_signature:
+                        import base64
+                        try:
+                            fc_kwargs["thought_signature"] = base64.b64decode(block.thought_signature)
+                        except Exception:
+                            fc_kwargs["thought_signature"] = block.thought_signature.encode("utf-8")
+                    parts.append(gtypes.Part(**fc_kwargs))
             if parts:
                 result.append(gtypes.Content(role="model", parts=parts))
 
@@ -117,12 +125,19 @@ def _build_config(
         tools = [gtypes.Tool(function_declarations=func_decls)]
 
     # Thinking budget
-    thinking_config: Any | None = None
+    # gemini-3-pro-preview (and other Gemini thinking models) will think by
+    # default, consuming output tokens before any text is produced.  When the
+    # caller has not explicitly requested reasoning we disable thinking so that
+    # the full max_output_tokens budget is available for the text response.
     if opts.reasoning:
         budget_map = {"minimal": 512, "low": 2048, "medium": 8192, "high": 24576, "xhigh": 32768}
-        thinking_config = gtypes.ThinkingConfig(
+        thinking_config: Any = gtypes.ThinkingConfig(
             thinking_budget=budget_map.get(opts.reasoning, 8192)
         )
+    else:
+        # thinking_budget=0 disables thinking on models that support it;
+        # on non-thinking models this field is silently ignored.
+        thinking_config: Any = gtypes.ThinkingConfig(thinking_budget=0)
 
     return gtypes.GenerateContentConfig(
         system_instruction=context.system_prompt or None,
@@ -231,11 +246,21 @@ async def stream_simple(
                     if fc:
                         idx = len(content_blocks)
                         args = dict(fc.args) if fc.args else {}
+                        # Capture thought_signature (present when thinking mode is on)
+                        ts_b64: str | None = None
+                        ts_raw = getattr(part, "thought_signature", None)
+                        if ts_raw:
+                            import base64
+                            if isinstance(ts_raw, bytes):
+                                ts_b64 = base64.b64encode(ts_raw).decode("ascii")
+                            elif isinstance(ts_raw, str):
+                                ts_b64 = ts_raw
                         tc = ToolCall(
                             type="toolCall",
                             id=f"call_{idx}_{fc.name}",
                             name=fc.name,
                             arguments=args,
+                            thought_signature=ts_b64,
                         )
                         content_blocks.append(tc)
                         partial = partial.model_copy(update={"content": list(content_blocks)})

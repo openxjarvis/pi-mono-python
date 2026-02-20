@@ -772,6 +772,40 @@ async def test_tui_initial_messages_render_without_text_delta(monkeypatch):
     class FakeSession:
         def __init__(self) -> None:
             self._listeners: list = []
+            from types import SimpleNamespace
+            self.model = SimpleNamespace(id='claude-3-5-sonnet-20241022', provider='anthropic')
+            self.thinking_level = 'off'
+
+        def get_context_usage(self):
+            return None
+
+        def get_active_tool_names(self):
+            return ['bash', 'read']
+
+        def get_session_stats(self):
+            return {'sessionId': 'test', 'userMessages': 0, 'assistantMessages': 0,
+                    'toolCalls': 0, 'tokens': {'total': 0}, 'cost': 0.0}
+
+        def cycle_thinking_level(self):
+            return 'minimal'
+
+        async def compact(self):
+            return ''
+
+        async def set_model(self, model):
+            self.model = model
+
+        async def cycle_model(self, direction='forward'):
+            return None
+
+        async def follow_up(self, msg):
+            pass
+
+        @property
+        def model_registry(self):
+            from types import SimpleNamespace
+            async def ga(): return [self.model]
+            return SimpleNamespace(get_available=ga)
 
         def subscribe(self, fn):
             self._listeners.append(fn)
@@ -872,6 +906,40 @@ async def test_tui_agent_end_error_is_rendered(monkeypatch):
     class FakeSession:
         def __init__(self) -> None:
             self._listeners: list = []
+            from types import SimpleNamespace
+            self.model = SimpleNamespace(id='claude-3-5-sonnet-20241022', provider='anthropic')
+            self.thinking_level = 'off'
+
+        def get_context_usage(self):
+            return None
+
+        def get_active_tool_names(self):
+            return ['bash', 'read']
+
+        def get_session_stats(self):
+            return {'sessionId': 'test', 'userMessages': 0, 'assistantMessages': 0,
+                    'toolCalls': 0, 'tokens': {'total': 0}, 'cost': 0.0}
+
+        def cycle_thinking_level(self):
+            return 'minimal'
+
+        async def compact(self):
+            return ''
+
+        async def set_model(self, model):
+            self.model = model
+
+        async def cycle_model(self, direction='forward'):
+            return None
+
+        async def follow_up(self, msg):
+            pass
+
+        @property
+        def model_registry(self):
+            from types import SimpleNamespace
+            async def ga(): return [self.model]
+            return SimpleNamespace(get_available=ga)
 
         def subscribe(self, fn):
             self._listeners.append(fn)
@@ -967,6 +1035,40 @@ async def test_tui_renders_tool_execution_lines(monkeypatch):
     class FakeSession:
         def __init__(self) -> None:
             self._listeners: list = []
+            from types import SimpleNamespace
+            self.model = SimpleNamespace(id='claude-3-5-sonnet-20241022', provider='anthropic')
+            self.thinking_level = 'off'
+
+        def get_context_usage(self):
+            return None
+
+        def get_active_tool_names(self):
+            return ['bash', 'read']
+
+        def get_session_stats(self):
+            return {'sessionId': 'test', 'userMessages': 0, 'assistantMessages': 0,
+                    'toolCalls': 0, 'tokens': {'total': 0}, 'cost': 0.0}
+
+        def cycle_thinking_level(self):
+            return 'minimal'
+
+        async def compact(self):
+            return ''
+
+        async def set_model(self, model):
+            self.model = model
+
+        async def cycle_model(self, direction='forward'):
+            return None
+
+        async def follow_up(self, msg):
+            pass
+
+        @property
+        def model_registry(self):
+            from types import SimpleNamespace
+            async def ga(): return [self.model]
+            return SimpleNamespace(get_available=ga)
 
         def subscribe(self, fn):
             self._listeners.append(fn)
@@ -1070,6 +1172,40 @@ async def test_tui_does_not_require_agent_end_event(monkeypatch):
     class FakeSession:
         def __init__(self) -> None:
             self._listeners: list = []
+            from types import SimpleNamespace
+            self.model = SimpleNamespace(id='claude-3-5-sonnet-20241022', provider='anthropic')
+            self.thinking_level = 'off'
+
+        def get_context_usage(self):
+            return None
+
+        def get_active_tool_names(self):
+            return ['bash', 'read']
+
+        def get_session_stats(self):
+            return {'sessionId': 'test', 'userMessages': 0, 'assistantMessages': 0,
+                    'toolCalls': 0, 'tokens': {'total': 0}, 'cost': 0.0}
+
+        def cycle_thinking_level(self):
+            return 'minimal'
+
+        async def compact(self):
+            return ''
+
+        async def set_model(self, model):
+            self.model = model
+
+        async def cycle_model(self, direction='forward'):
+            return None
+
+        async def follow_up(self, msg):
+            pass
+
+        @property
+        def model_registry(self):
+            from types import SimpleNamespace
+            async def ga(): return [self.model]
+            return SimpleNamespace(get_available=ga)
 
         def subscribe(self, fn):
             self._listeners.append(fn)

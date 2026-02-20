@@ -103,10 +103,12 @@ async def test_live_gemini_complete_basic():
     from pi_ai.stream import complete_simple
     from pi_ai.types import AssistantMessage, SimpleStreamOptions
 
+    # Use generous max_tokens: thinking models spend tokens on reasoning first,
+    # so a tight budget (e.g. 50) may be fully consumed before any text is produced.
     msg = await complete_simple(
         _make_model(),
         _make_context("Say exactly: hello world"),
-        SimpleStreamOptions(api_key=_get_api_key(), max_tokens=50),
+        SimpleStreamOptions(api_key=_get_api_key(), max_tokens=1024),
     )
     if getattr(msg, "stop_reason", None) == "error" and _is_transient_unavailable(getattr(msg, "error_message", None)):
         pytest.skip(f"Transient model unavailability: {msg.error_message}")
@@ -271,7 +273,7 @@ async def test_live_gemini_usage_fields():
     msg = await complete_simple(
         _make_model(),
         _make_context("Say exactly: hello world"),
-        SimpleStreamOptions(api_key=_get_api_key(), max_tokens=50),
+        SimpleStreamOptions(api_key=_get_api_key(), max_tokens=1024),
     )
     if getattr(msg, "stop_reason", None) == "error" and _is_transient_unavailable(getattr(msg, "error_message", None)):
         pytest.skip(f"Transient model unavailability: {msg.error_message}")

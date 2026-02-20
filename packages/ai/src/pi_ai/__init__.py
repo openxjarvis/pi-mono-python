@@ -60,6 +60,7 @@ from .stream import complete, complete_simple, stream, stream_simple
 # Utilities
 from .utils.event_stream import EventStream
 from .utils.json_parse import parse_partial_json
+from .utils.overflow import is_context_overflow, get_overflow_patterns
 from .utils.validation import validate_tool_arguments
 
 __all__ = [
@@ -86,4 +87,5 @@ __all__ = [
     "stream", "complete", "stream_simple", "complete_simple",
     # Utils
     "EventStream", "parse_partial_json", "validate_tool_arguments",
+    "is_context_overflow", "get_overflow_patterns",
 ]
