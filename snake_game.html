@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>贪吃蛇游戏</title>
+    <style>
+        body {
+            display: flex;
+            justify_content: center;
+            align_items: center;
+            height: 100vh;
+            background-color: #222;
+            margin: 0;
+            color: white;
+            font-family: Arial, sans-serif;
+            flex-direction: column;
+        }
+        canvas {
+            border: 2px solid #fff;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #score {
+            margin-bottom: 10px;
+            font-size: 24px;
+        }
+        .instructions {
+            margin-top: 10px;
+            color: #aaa;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div id="score">得分: 0</div>
+    <canvas id="gameCanvas" width="400" height="400"></canvas>
+    <div class="instructions">使用方向键控制移动</div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        const gridSize = 20;
+        const tileCount = canvas.width / gridSize;
+        
+        let score = 0;
+        let velocityX = 0;
+        let velocityY = 0;
+        let posX = 10;
+        let posY = 10;
+        
+        let trail = [];
+        let tail = 5;
+        
+        let appleX = 15;
+        let appleY = 15;
+        
+        // 防止按键过快导致反向自杀
+        let lastMoveTime = 0;
+        
+        document.addEventListener('keydown', keyPush);
+        
+        // 游戏主循环，每秒15帧
+        setInterval(game, 1000/15);
+        
+        function game() {
+            posX += velocityX;
+            posY += velocityY;
+            
+            // 穿墙逻辑
+            if(posX < 0) posX = tileCount-1;
+            if(posX > tileCount-1) posX = 0;
+            if(posY < 0) posY = tileCount-1;
+            if(posY > tileCount-1) posY = 0;
+            
+            // 绘制背景
+            ctx.fillStyle = '#222';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // 绘制蛇
+            ctx.fillStyle = 'lime';
+            for(let i=0; i<trail.length; i++) {
+                ctx.fillRect(trail[i].x*gridSize, trail[i].y*gridSize, gridSize-2, gridSize-2);
+                
+                // 撞到自己，游戏重置
+                if(trail[i].x === posX && trail[i].y === posY && (velocityX !==0 || velocityY !==0)) {
+                    tail = 5;
+                    score = 0;
+                    document.getElementById('score').innerText = '得分: ' + score;
+                }
+            }
+            
+            trail.push({x:posX, y:posY});
+            while(trail.length > tail) {
+                trail.shift();
+            }
+            
+            // 吃苹果
+            if(appleX === posX && appleY === posY) {
+                tail++;
+                score++;
+                document.getElementById('score').innerText = '得分: ' + score;
+                appleX = Math.floor(Math.random()*tileCount);
+                appleY = Math.floor(Math.random()*tileCount);
+            }
+            
+            // 绘制苹果
+            ctx.fillStyle = 'red';
+            ctx.fillRect(appleX*gridSize, appleY*gridSize, gridSize-2, gridSize-2);
+        }
+        
+        function keyPush(evt) {
+            // 简单的防抖动逻辑，防止在一帧内连续转向导致掉头
+            const now = Date.now();
+            if (now - lastMoveTime < 50) return; 
+            lastMoveTime = now;
+
+            switch(evt.keyCode) {
+                case 37: // Left
+                    if(velocityX !== 1) { velocityX = -1; velocityY = 0; }
+                    break;
+                case 38: // Up
+                    if(velocityY !== 1) { velocityX = 0; velocityY = -1; }
+                    break;
+                case 39: // Right
+                    if(velocityX !== -1) { velocityX = 1; velocityY = 0; }
+                    break;
+                case 40: // Down
+                    if(velocityY !== -1) { velocityX = 0; velocityY = 1; }
+                    break;
+            }
+        }
+    </script>
+</body>
+</html>
