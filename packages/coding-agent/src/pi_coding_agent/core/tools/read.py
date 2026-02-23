@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import imghdr
 import os
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -31,6 +30,29 @@ SUPPORTED_IMAGE_MIME_TYPES = {
     "webp": "image/webp",
 }
 
+# Magic byte signatures — mirrors imghdr behaviour removed in Python 3.13.
+_IMAGE_SIGNATURES: list[tuple[bytes, bytes | None, str]] = [
+    # (start_bytes, optional_bytes_at_offset_8, mime_type)
+    (b"\xff\xd8\xff", None, "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", None, "image/png"),
+    (b"GIF87a", None, "image/gif"),
+    (b"GIF89a", None, "image/gif"),
+    # WebP: starts with RIFF, bytes 8-12 are WEBP
+    (b"RIFF", b"WEBP", "image/webp"),
+]
+
+
+def _detect_image_type_from_bytes(header: bytes) -> str | None:
+    """Return MIME type string from raw file header bytes, or None."""
+    for magic, secondary, mime in _IMAGE_SIGNATURES:
+        if header[: len(magic)] == magic:
+            if secondary is None:
+                return mime
+            # For WebP the secondary tag starts at offset 8
+            if len(header) >= 12 and header[8:12] == secondary:
+                return mime
+    return None
+
 
 @dataclass
 class ReadToolDetails:
@@ -38,10 +60,14 @@ class ReadToolDetails:
 
 
 def detect_image_mime_type(path: str) -> str | None:
-    """Detect image MIME type from file content."""
+    """Detect image MIME type by inspecting the first 12 bytes of the file.
+
+    Replaces the stdlib ``imghdr`` module which was removed in Python 3.13.
+    """
     try:
-        kind = imghdr.what(path)
-        return SUPPORTED_IMAGE_MIME_TYPES.get(kind)
+        with open(path, "rb") as fh:
+            header = fh.read(12)
+        return _detect_image_type_from_bytes(header)
     except Exception:
         return None
 
