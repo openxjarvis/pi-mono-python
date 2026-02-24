@@ -61,3 +61,6 @@ Thumbs.db
 *.tmp
 tmp_*.txt
 scratch.*
+
+# === Documentation (temporary development docs) ===
+docs/
