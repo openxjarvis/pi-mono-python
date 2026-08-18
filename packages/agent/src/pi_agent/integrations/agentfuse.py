@@ -26,11 +26,6 @@ class AgentFuseToolGuard:
 
         self._guard = guard
         self._request_type = ToolCallRequest
-        self._decisions: dict[str, Any] = {}
-
-    def decision_for(self, tool_call_id: str) -> Any | None:
-        """Return the completed policy decision for a tool call, if available."""
-        return self._decisions.get(tool_call_id)
 
     def wrap(self, tool: AgentTool) -> AgentTool:
         """Return a copy of ``tool`` guarded immediately before dispatch."""
@@ -42,15 +37,35 @@ class AgentFuseToolGuard:
             cancel_event: asyncio.Event | None = None,
             on_update: AgentToolUpdateCallback | None = None,
         ) -> AgentToolResult:
-            decision = await self._guard.aevaluate(
-                self._request_type(
-                    tool_call_id=tool_call_id,
-                    tool_name=tool.name,
-                    arguments=params,
-                    safe_metadata={"integration": "pi-agent"},
+            try:
+                decision = await self._guard.aevaluate(
+                    self._request_type(
+                        tool_call_id=tool_call_id,
+                        tool_name=tool.name,
+                        arguments=params,
+                        safe_metadata={"integration": "pi-agent"},
+                    )
                 )
-            )
-            self._decisions[tool_call_id] = decision
+            except Exception:
+                return AgentToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text="Tool call not executed because AgentFuse evaluation failed",
+                        )
+                    ],
+                    details={
+                        "guard_failed": True,
+                        "policy_denied": False,
+                        "tool_failure": False,
+                        "reason_code": "guard_evaluation_exception",
+                        "tool_call_id": tool_call_id,
+                        "host_execution": {
+                            "outcome": "not_executed",
+                            "handler_started": False,
+                        },
+                    },
+                )
 
             if decision.action == "block":
                 return AgentToolResult(
