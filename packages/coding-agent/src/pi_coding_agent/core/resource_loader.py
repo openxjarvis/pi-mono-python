@@ -34,20 +34,28 @@ class ResourceExtensionPaths:
     theme_paths: list[dict[str, Any]] = field(default_factory=list)
 
 
-_CONTEXT_CANDIDATES = ["AGENTS.md", "CLAUDE.md"]
+_CONTEXT_CANDIDATES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]
 
 
 def _load_context_file_from_dir(dir_path: str) -> dict[str, str] | None:
-    """Load the first AGENTS.md or CLAUDE.md found in dir_path."""
+    """Load the first context file found in dir_path (AGENTS.override.md, AGENTS.md, CLAUDE.md)."""
     for filename in _CONTEXT_CANDIDATES:
         fpath = os.path.join(dir_path, filename)
-        if os.path.exists(fpath):
+        if os.path.exists(fpath) and os.path.isfile(fpath):
             try:
+                from pi_coding_agent.utils.text import strip_bom
                 with open(fpath, encoding="utf-8", errors="replace") as f:
-                    return {"path": fpath, "content": f.read()}
+                    return {"path": fpath, "content": strip_bom(f.read())}
             except OSError as e:
                 print(f"Warning: Could not read {fpath}: {e}")
     return None
+
+
+def load_project_context_files(
+    cwd: str | None = None, agent_dir: str | None = None
+) -> list[dict[str, str]]:
+    """Public alias for project context loading. Mirrors loadProjectContextFiles()."""
+    return _load_project_context_files(cwd, agent_dir)
 
 
 def _load_project_context_files(
@@ -93,8 +101,9 @@ def _resolve_prompt_input(input_path: str | None, description: str) -> str | Non
         return None
     if os.path.exists(input_path):
         try:
+            from pi_coding_agent.utils.text import strip_bom
             with open(input_path, encoding="utf-8", errors="replace") as f:
-                return f.read()
+                return strip_bom(f.read())
         except OSError as e:
             print(f"Warning: Could not read {description} file {input_path}: {e}")
             return input_path
@@ -124,6 +133,7 @@ class DefaultResourceLoaderOptions:
     no_skills: bool = False
     no_prompt_templates: bool = False
     no_themes: bool = False
+    no_context_files: bool = False
     system_prompt: str | None = None
     append_system_prompt: str | None = None
     extensions_override: Callable | None = None
@@ -156,6 +166,7 @@ class DefaultResourceLoader:
         self._no_skills = opts.no_skills
         self._no_prompt_templates = opts.no_prompt_templates
         self._no_themes = opts.no_themes
+        self._no_context_files = opts.no_context_files
         self._system_prompt_source = opts.system_prompt
         self._append_system_prompt_source = opts.append_system_prompt
         self._extensions_override = opts.extensions_override
@@ -252,8 +263,8 @@ class DefaultResourceLoader:
             self._update_themes_from_paths(merged_theme_paths)
 
         # Load AGENTS.md context files
-        agents_files_base = {"agentsFiles": _load_project_context_files(self._cwd, self._agent_dir),
-                             "agents_files": _load_project_context_files(self._cwd, self._agent_dir)}
+        loaded_ctx = [] if self._no_context_files else _load_project_context_files(self._cwd, self._agent_dir)
+        agents_files_base = {"agentsFiles": loaded_ctx, "agents_files": loaded_ctx}
         resolved = (
             self._agents_files_override(agents_files_base)
             if self._agents_files_override
@@ -389,9 +400,8 @@ class DefaultResourceLoader:
                 continue
             try:
                 if os.path.isfile(path) and path.endswith(".json"):
-                    import json
-                    with open(path, encoding="utf-8") as f:
-                        colors = json.load(f)
+                    from pi_coding_agent.utils.text import load_json_file
+                    colors = load_json_file(path)
                     name = os.path.splitext(os.path.basename(path))[0]
                     themes.append(Theme(name=name, path=path, colors=colors))
                 elif os.path.isdir(path):
@@ -399,9 +409,8 @@ class DefaultResourceLoader:
                         if fname.endswith(".json"):
                             fpath = os.path.join(path, fname)
                             try:
-                                import json
-                                with open(fpath, encoding="utf-8") as f:
-                                    colors = json.load(f)
+                                from pi_coding_agent.utils.text import load_json_file
+                                colors = load_json_file(fpath)
                                 name = os.path.splitext(fname)[0]
                                 themes.append(Theme(name=name, path=fpath, colors=colors))
                             except Exception as e:
@@ -508,11 +517,20 @@ class DefaultResourceLoader:
             expanded = t
         return os.path.abspath(os.path.join(self._cwd, expanded))
 
+    def _project_trusted(self) -> bool:
+        mgr = self._settings_manager
+        if mgr is None:
+            return True
+        checker = getattr(mgr, "is_project_trusted", None)
+        if callable(checker):
+            return bool(checker())
+        return True
+
     def _discover_system_prompt_file(self) -> str | None:
         from pi_coding_agent.config import CONFIG_DIR_NAME
 
         project_path = os.path.join(self._cwd, CONFIG_DIR_NAME, "SYSTEM.md")
-        if os.path.exists(project_path):
+        if self._project_trusted() and os.path.exists(project_path):
             return project_path
         global_path = os.path.join(self._agent_dir, "SYSTEM.md")
         if os.path.exists(global_path):
@@ -523,7 +541,7 @@ class DefaultResourceLoader:
         from pi_coding_agent.config import CONFIG_DIR_NAME
 
         project_path = os.path.join(self._cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md")
-        if os.path.exists(project_path):
+        if self._project_trusted() and os.path.exists(project_path):
             return project_path
         global_path = os.path.join(self._agent_dir, "APPEND_SYSTEM.md")
         if os.path.exists(global_path):

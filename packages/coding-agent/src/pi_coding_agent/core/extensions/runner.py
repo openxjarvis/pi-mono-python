@@ -193,6 +193,28 @@ class ExtensionRunner:
             result = await result
         return result
 
+    async def emit_before_provider_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        """Emit before_provider_headers. Returns transformed headers."""
+        result = await self.emit({"type": "before_provider_headers", "headers": headers})
+        if isinstance(result, dict) and isinstance(result.get("headers"), dict):
+            return result["headers"]
+        return headers
+
+    async def emit_before_provider_request(self, payload: Any) -> Any:
+        """Emit before_provider_request. Returns transformed payload."""
+        result = await self.emit({"type": "before_provider_request", "payload": payload})
+        if isinstance(result, dict) and "payload" in result:
+            return result["payload"]
+        return payload
+
+    async def emit_after_provider_response(self, status: Any, headers: dict[str, str] | None = None) -> None:
+        """Emit after_provider_response."""
+        await self.emit({
+            "type": "after_provider_response",
+            "status": status,
+            "headers": headers or {},
+        })
+
     async def shutdown(self) -> None:
         """Emit session_shutdown to all extensions."""
         await self.emit({"type": "session_shutdown"})

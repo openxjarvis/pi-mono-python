@@ -2,7 +2,15 @@
 Context compaction for long agent sessions.
 """
 
-from .compaction import compact_context, should_compact
+from .compaction import (
+    compact,
+    compact_context,
+    estimate_context_tokens,
+    get_assistant_usage,
+    get_last_assistant_usage,
+    prepare_compaction,
+    should_compact,
+)
 from .branch_summarization import (
     BranchPreparation,
     BranchSummaryDetails,
@@ -24,7 +32,12 @@ from .utils import (
 
 __all__ = [
     "BranchPreparation",
+    "compact",
     "compact_context",
+    "estimate_context_tokens",
+    "get_assistant_usage",
+    "get_last_assistant_usage",
+    "prepare_compaction",
     "should_compact",
     "BranchSummaryDetails",
     "BranchSummaryResult",

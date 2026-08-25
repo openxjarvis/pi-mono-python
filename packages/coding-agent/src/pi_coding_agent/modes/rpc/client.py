@@ -13,6 +13,7 @@ import subprocess
 import sys
 from typing import Any, Callable
 
+from .jsonl import serialize_json_line, parse_json_line
 from .types import RpcResponse, RpcSessionState, RpcSlashCommand
 
 
@@ -217,6 +218,26 @@ class RpcClient:
         response = await self._send({"type": "fork", "entryId": entry_id})
         return self._get_data(response)
 
+    async def clone(self) -> dict[str, Any]:
+        response = await self._send({"type": "clone"})
+        return self._get_data(response)
+
+    async def get_entries(self, since: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"type": "get_entries"}
+        if since is not None:
+            payload["since"] = since
+        response = await self._send(payload)
+        return self._get_data(response)
+
+    async def get_tree(self) -> dict[str, Any]:
+        response = await self._send({"type": "get_tree"})
+        return self._get_data(response)
+
+    async def get_available_thinking_levels(self) -> list[str]:
+        response = await self._send({"type": "get_available_thinking_levels"})
+        data = self._get_data(response)
+        return data.get("levels", [])
+
     async def get_fork_messages(self) -> list[dict[str, str]]:
         response = await self._send({"type": "get_fork_messages"})
         data = self._get_data(response)
@@ -298,20 +319,16 @@ class RpcClient:
     # =========================================================================
 
     async def _read_loop(self) -> None:
-        """Background task reading stdout from the agent process."""
+        """Background task reading stdout from the agent process using strict LF framing."""
         loop = asyncio.get_event_loop()
         while self._process and self._process.stdout:
             line_bytes = await loop.run_in_executor(None, self._process.stdout.readline)
             if not line_bytes:
                 break
-            line = line_bytes.decode().strip()
-            if not line:
+            data = parse_json_line(line_bytes.decode("utf-8", errors="replace"))
+            if data is None:
                 continue
-            try:
-                data = json.loads(line)
-                self._handle_line(data)
-            except json.JSONDecodeError:
-                pass
+            self._handle_line(data)
 
             # Collect stderr
             if self._process and self._process.stderr:
@@ -345,8 +362,8 @@ class RpcClient:
 
         async def _do_send() -> dict[str, Any]:
             self._pending_requests[req_id] = future
-            line = json.dumps(full_command) + "\n"
-            await loop.run_in_executor(None, self._process.stdin.write, line.encode())
+            line = serialize_json_line(full_command)
+            await loop.run_in_executor(None, self._process.stdin.write, line.encode("utf-8"))
             await loop.run_in_executor(None, self._process.stdin.flush)
             try:
                 return await asyncio.wait_for(future, timeout=30.0)

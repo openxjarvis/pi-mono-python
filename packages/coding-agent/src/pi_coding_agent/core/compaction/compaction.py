@@ -183,16 +183,79 @@ def estimate_tokens(message: dict[str, Any] | Any) -> int:
     return max(1, (chars + 3) // 4)
 
 
-def calculate_context_tokens(usage: dict[str, Any]) -> int:
-    """Calculate total context tokens from usage dict."""
-    if usage.get("totalTokens"):
-        return usage["totalTokens"]
-    return (
-        usage.get("input", 0)
-        + usage.get("output", 0)
-        + usage.get("cacheRead", 0)
-        + usage.get("cacheWrite", 0)
-    )
+def _usage_to_dict(usage: Any) -> dict[str, Any]:
+    """Normalize Usage objects / dicts to the camelCase fields used by TS."""
+    if usage is None:
+        return {}
+    if isinstance(usage, dict):
+        return {
+            "totalTokens": usage.get("totalTokens") or usage.get("total_tokens") or 0,
+            "input": usage.get("input", 0) or 0,
+            "output": usage.get("output", 0) or 0,
+            "cacheRead": usage.get("cacheRead") or usage.get("cache_read") or 0,
+            "cacheWrite": usage.get("cacheWrite") or usage.get("cache_write") or 0,
+        }
+    if hasattr(usage, "model_dump"):
+        return _usage_to_dict(usage.model_dump())
+    return {
+        "totalTokens": getattr(usage, "total_tokens", 0) or getattr(usage, "totalTokens", 0) or 0,
+        "input": getattr(usage, "input", 0) or 0,
+        "output": getattr(usage, "output", 0) or 0,
+        "cacheRead": getattr(usage, "cache_read", 0) or getattr(usage, "cacheRead", 0) or 0,
+        "cacheWrite": getattr(usage, "cache_write", 0) or getattr(usage, "cacheWrite", 0) or 0,
+    }
+
+
+def calculate_context_tokens(usage: dict[str, Any] | Any) -> int:
+    """Calculate total context tokens from usage.
+
+    Uses the native totalTokens field when available, falls back to components.
+    Mirrors calculateContextTokens() in TypeScript.
+    """
+    d = _usage_to_dict(usage)
+    if d.get("totalTokens"):
+        return int(d["totalTokens"])
+    return int(d.get("input", 0) + d.get("output", 0) + d.get("cacheRead", 0) + d.get("cacheWrite", 0))
+
+
+def _message_role(msg: Any) -> str:
+    return msg.get("role", "") if isinstance(msg, dict) else getattr(msg, "role", "")
+
+
+def _message_stop_reason(msg: Any) -> str:
+    if isinstance(msg, dict):
+        return msg.get("stop_reason") or msg.get("stopReason") or ""
+    return getattr(msg, "stop_reason", "") or getattr(msg, "stopReason", "") or ""
+
+
+def get_assistant_usage(msg: Any) -> dict[str, Any] | None:
+    """Return usage from an assistant message if it is valid.
+
+    Skips aborted, error, and all-zero usage messages.
+    Mirrors getAssistantUsage() in TypeScript.
+    """
+    if _message_role(msg) != "assistant":
+        return None
+    if _message_stop_reason(msg) in ("aborted", "error"):
+        return None
+    usage = msg.get("usage") if isinstance(msg, dict) else getattr(msg, "usage", None)
+    if not usage:
+        return None
+    usage_dict = _usage_to_dict(usage)
+    if calculate_context_tokens(usage_dict) <= 0:
+        return None
+    return usage_dict
+
+
+def get_last_assistant_usage(entries: list[Any]) -> dict[str, Any] | None:
+    """Find the last valid assistant message usage from session entries."""
+    for entry in reversed(entries):
+        raw = _as_entry_dict(entry)
+        if raw.get("type") == "message":
+            usage = get_assistant_usage(raw.get("message"))
+            if usage:
+                return usage
+    return None
 
 
 def estimate_context_tokens(messages: list[Any]) -> dict[str, Any]:
@@ -200,23 +263,16 @@ def estimate_context_tokens(messages: list[Any]) -> dict[str, Any]:
     Estimate context tokens from messages, using the last assistant usage when available.
     Mirrors estimateContextTokens() in TypeScript.
 
+    Without provider usage (error / all-zero), tokens is the pure message-size estimate.
     Returns {"tokens", "usageTokens", "trailingTokens", "lastUsageIndex"}.
     """
     last_usage: dict[str, Any] | None = None
     last_usage_idx: int | None = None
 
     for i in reversed(range(len(messages))):
-        msg = messages[i]
-        role = msg.get("role", "") if isinstance(msg, dict) else getattr(msg, "role", "")
-        stop_reason = (
-            msg.get("stop_reason") or msg.get("stopReason", "")
-            if isinstance(msg, dict)
-            else getattr(msg, "stop_reason", "") or getattr(msg, "stopReason", "")
-        )
-        usage = msg.get("usage") if isinstance(msg, dict) else getattr(msg, "usage", None)
-
-        if role == "assistant" and usage and stop_reason not in ("aborted", "error"):
-            last_usage = usage if isinstance(usage, dict) else getattr(usage, "__dict__", {})
+        usage = get_assistant_usage(messages[i])
+        if usage:
+            last_usage = usage
             last_usage_idx = i
             break
 
@@ -336,6 +392,187 @@ def find_cut_point(
     }
 
 
+def _as_entry_dict(entry: Any) -> dict[str, Any]:
+    """Normalize SessionEntry objects or raw dicts to the on-disk entry shape."""
+    if isinstance(entry, dict):
+        return entry
+    data = getattr(entry, "data", None)
+    if isinstance(data, dict) and data:
+        return data
+    return {
+        "id": getattr(entry, "id", ""),
+        "type": getattr(entry, "type", ""),
+        "timestamp": getattr(entry, "timestamp", 0),
+        "parentId": getattr(entry, "parent_id", None),
+    }
+
+
+def _message_from_entry(entry: dict[str, Any]) -> Any | None:
+    """Extract an AgentMessage from a session entry, or None if it is not in LLM context."""
+    etype = entry.get("type", "")
+    if etype == "compaction":
+        return None
+    if etype == "message":
+        return entry.get("message")
+    if etype == "custom_message":
+        return {
+            "role": "custom",
+            "content": entry.get("content", ""),
+            "customType": entry.get("customType", ""),
+            "timestamp": entry.get("timestamp", 0),
+        }
+    if etype == "branch_summary":
+        return {
+            "role": "branchSummary",
+            "summary": entry.get("summary", ""),
+            "timestamp": entry.get("timestamp", 0),
+        }
+    return None
+
+
+def prepare_compaction(
+    path_entries: list[Any],
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Pre-calculate compaction cut points and messages to summarize.
+
+    Mirrors prepareCompaction() in TypeScript.
+    """
+    s = {**DEFAULT_COMPACTION_SETTINGS, **(settings or {})}
+    entries = [_as_entry_dict(e) for e in path_entries]
+    if not entries:
+        return None
+    if entries[-1].get("type") == "compaction":
+        return None
+
+    prev_compaction_index = -1
+    for i in range(len(entries) - 1, -1, -1):
+        if entries[i].get("type") == "compaction":
+            prev_compaction_index = i
+            break
+
+    previous_summary: str | None = None
+    boundary_start = 0
+    if prev_compaction_index >= 0:
+        prev = entries[prev_compaction_index]
+        previous_summary = prev.get("summary")
+        first_kept_id = prev.get("firstKeptEntryId")
+        first_kept_idx = next((i for i, e in enumerate(entries) if e.get("id") == first_kept_id), -1)
+        boundary_start = first_kept_idx if first_kept_idx >= 0 else prev_compaction_index + 1
+
+    cut = find_cut_point(entries, boundary_start, len(entries), s.get("keepRecentTokens", 20000))
+    first_kept = entries[cut["firstKeptEntryIndex"]] if cut["firstKeptEntryIndex"] < len(entries) else None
+    if not first_kept or not first_kept.get("id"):
+        return None
+
+    history_end = cut["turnStartIndex"] if cut["isSplitTurn"] else cut["firstKeptEntryIndex"]
+    messages_to_summarize = [
+        msg
+        for i in range(boundary_start, max(history_end, 0))
+        if (msg := _message_from_entry(entries[i])) is not None
+    ]
+    turn_prefix_messages: list[Any] = []
+    if cut["isSplitTurn"]:
+        turn_prefix_messages = [
+            msg
+            for i in range(cut["turnStartIndex"], cut["firstKeptEntryIndex"])
+            if (msg := _message_from_entry(entries[i])) is not None
+        ]
+
+    if not messages_to_summarize and not turn_prefix_messages:
+        return None
+
+    tokens_before = estimate_context_tokens(
+        [m for e in entries if (m := _message_from_entry(e)) is not None]
+    )["tokens"]
+
+    from .utils import create_file_ops, extract_file_ops_from_message
+
+    file_ops = create_file_ops()
+    if prev_compaction_index >= 0:
+        details = entries[prev_compaction_index].get("details") or {}
+        if isinstance(details, dict):
+            for f in details.get("readFiles") or []:
+                file_ops.read.add(f)
+            for f in details.get("modifiedFiles") or []:
+                file_ops.edited.add(f)
+    for msg in messages_to_summarize + turn_prefix_messages:
+        extract_file_ops_from_message(msg, file_ops)
+
+    return {
+        "firstKeptEntryId": first_kept["id"],
+        "messagesToSummarize": messages_to_summarize,
+        "turnPrefixMessages": turn_prefix_messages,
+        "isSplitTurn": cut["isSplitTurn"],
+        "tokensBefore": tokens_before,
+        "previousSummary": previous_summary,
+        "fileOps": file_ops,
+        "settings": s,
+    }
+
+
+async def compact(
+    preparation: dict[str, Any],
+    model: Any,
+    api_key: str | None = None,
+    custom_instructions: str | None = None,
+) -> dict[str, Any]:
+    """Generate compaction summaries from a prepare_compaction() result.
+
+    Mirrors compact() in TypeScript (without retry/streamFn plumbing).
+    """
+    from .utils import compute_file_lists, format_file_operations
+
+    messages_to_summarize = preparation["messagesToSummarize"]
+    turn_prefix_messages = preparation["turnPrefixMessages"]
+    is_split = preparation["isSplitTurn"]
+    previous_summary = preparation.get("previousSummary")
+    settings = preparation.get("settings") or DEFAULT_COMPACTION_SETTINGS
+    reserve = settings.get("reserveTokens", 16384)
+    file_ops = preparation.get("fileOps")
+
+    if is_split and turn_prefix_messages:
+        history_text = "No prior history."
+        if messages_to_summarize:
+            history_text = await generate_summary(
+                current_messages=messages_to_summarize,
+                model=model,
+                reserve_tokens=reserve,
+                api_key=api_key,
+                custom_instructions=custom_instructions,
+                previous_summary=previous_summary,
+            )
+        prefix_text = await generate_summary(
+            current_messages=turn_prefix_messages,
+            model=model,
+            reserve_tokens=max(1, reserve // 2),
+            api_key=api_key,
+        )
+        summary = f"{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix_text}"
+    else:
+        summary = await generate_summary(
+            current_messages=messages_to_summarize,
+            model=model,
+            reserve_tokens=reserve,
+            api_key=api_key,
+            custom_instructions=custom_instructions,
+            previous_summary=previous_summary,
+        )
+
+    if file_ops is not None:
+        read_files, modified_files = compute_file_lists(file_ops)
+        summary += format_file_operations(read_files, modified_files)
+    else:
+        read_files, modified_files = [], []
+
+    return {
+        "summary": summary,
+        "firstKeptEntryId": preparation["firstKeptEntryId"],
+        "tokensBefore": preparation["tokensBefore"],
+        "details": {"readFiles": read_files, "modifiedFiles": modified_files},
+    }
+
+
 # ─── Legacy API ───────────────────────────────────────────────────────────────
 
 def should_compact(
@@ -365,6 +602,27 @@ def _estimate_tokens_legacy(messages: list[Message]) -> int:
 
 
 # ─── Summarization ────────────────────────────────────────────────────────────
+
+def get_summarization_failure(response: Any, label: str) -> str | None:
+    """Return an error message when a summarization response cannot safely be persisted.
+
+    A length stop contains partial text and must not become a session checkpoint.
+    Mirrors getSummarizationFailure() in TypeScript.
+    """
+    stop_reason = getattr(response, "stop_reason", None) or (
+        response.get("stop_reason") or response.get("stopReason") if isinstance(response, dict) else None
+    )
+    if stop_reason == "error":
+        error_message = getattr(response, "error_message", None) or (
+            response.get("error_message") or response.get("errorMessage") if isinstance(response, dict) else None
+        )
+        return f"{label} failed: {error_message or 'Unknown error'}"
+    if stop_reason == "length":
+        return f"{label} failed: generation hit the token cap and the summary is incomplete"
+    return None
+
+
+
 
 async def generate_summary(
     current_messages: list[Any],
@@ -412,14 +670,15 @@ async def generate_summary(
             )],
         )
         response = await complete_simple(model, ctx, opts)
-        if getattr(response, "stop_reason", None) == "error":
-            raise RuntimeError(f"Summarization failed: {getattr(response, 'error_message', 'Unknown error')}")
+        failure = get_summarization_failure(response, "Summarization")
+        if failure:
+            raise RuntimeError(failure)
 
         return " ".join(
             b.text for b in response.content if isinstance(b, TextContent)
         )
     except Exception:
-        return "[Summary generation failed]"
+        raise
 
 
 def _serialize_conversation(messages: list[Any]) -> str:

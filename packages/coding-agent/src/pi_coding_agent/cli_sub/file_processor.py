@@ -73,8 +73,9 @@ async def process_file_arguments(
             result.text += f'<file name="{abs_path}"></file>\n'
         else:
             try:
+                from pi_coding_agent.utils.text import strip_bom
                 with open(abs_path, encoding="utf-8") as f:
-                    content_str = f.read()
+                    content_str = strip_bom(f.read())
                 result.text += f'<file name="{abs_path}">\n{content_str}\n</file>\n'
             except Exception as e:
                 print(f"Error: Could not read file {abs_path}: {e}", file=sys.stderr)

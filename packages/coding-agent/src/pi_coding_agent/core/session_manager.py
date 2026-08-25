@@ -342,7 +342,9 @@ class SessionManager:
     @staticmethod
     def _resolve_sessions_dir(cwd: str, session_dir: str | None = None) -> str:
         if session_dir:
-            return os.path.abspath(session_dir)
+            resolved = os.path.abspath(session_dir)
+            os.makedirs(resolved, exist_ok=True)
+            return resolved
         safe = f"--{cwd.lstrip('/').lstrip(os.sep).replace('/', '-').replace(os.sep, '-').replace(':', '-')}--"
         base = os.path.join(os.path.expanduser("~"), ".pi", "agent", "sessions", safe)
         os.makedirs(base, exist_ok=True)
@@ -639,6 +641,10 @@ class SessionManager:
     def get_session_file(self) -> str | None:
         """Get the session file path."""
         return self._session_file_path
+
+    def is_persisted(self) -> bool:
+        """Whether this session is backed by a JSONL file."""
+        return bool(self._session_file_path)
 
     def get_cwd(self) -> str:
         """Get the working directory."""

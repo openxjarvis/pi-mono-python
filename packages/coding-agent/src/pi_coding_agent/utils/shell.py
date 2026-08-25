@@ -79,6 +79,25 @@ def get_shell_config() -> tuple[str, list[str]]:
     return _cached_shell_config
 
 
+POWERSHELL_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+
+
+def get_powershell_config() -> tuple[str, list[str]]:
+    """Resolve PowerShell on Windows, preferring PowerShell 7 when available.
+
+    Mirrors getPowerShellConfig() in TypeScript. Raises on non-Windows.
+    """
+    if sys.platform != "win32":
+        raise RuntimeError("The powershell tool is only available on Windows.")
+
+    shell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+    if not shell:
+        raise RuntimeError(
+            "No PowerShell executable found. Install PowerShell or add powershell.exe/pwsh.exe to PATH."
+        )
+    return shell, list(POWERSHELL_ARGS)
+
+
 def reset_shell_config_cache() -> None:
     """Reset shell config cache (for testing)."""
     global _cached_shell_config

@@ -484,7 +484,7 @@ def wrap_text_with_ansi(text: str, width: int) -> list[str]:
     if not text:
         return [""]
 
-    input_lines = text.split("\n")
+    input_lines = re.split(r"\r\n|\r|\n", text)
     result: list[str] = []
     tracker = AnsiCodeTracker()
 
@@ -830,7 +830,7 @@ def extract_segments(
 # Misc character utilities
 # ─────────────────────────────────────────────────────────────────────────────
 
-_PUNCTUATION_RE = re.compile(r"[(){}\[\]<>.,;:'\"!?+\-=*/\\|&%^$#@~`]")
+PUNCTUATION_REGEX = re.compile(r"[(){}\[\]<>.,;:'\"!?+\-=*/\\|&%^$#@~`]")
 
 
 def is_whitespace_char(ch: str) -> bool:
@@ -838,4 +838,100 @@ def is_whitespace_char(ch: str) -> bool:
 
 
 def is_punctuation_char(ch: str) -> bool:
-    return bool(_PUNCTUATION_RE.match(ch))
+    return bool(PUNCTUATION_REGEX.match(ch))
+
+
+def strip_terminal_sequences(s: str) -> str:
+    """Remove ANSI, OSC, and APC control sequences while preserving visible text."""
+    if "\x1b" not in s:
+        return s
+    result: list[str] = []
+    i = 0
+    while i < len(s):
+        ansi = extract_ansi_code(s, i)
+        if ansi:
+            i += ansi.length
+            continue
+        result.append(s[i])
+        i += 1
+    return "".join(result)
+
+
+def get_grapheme_cell_range(line: str, column: int) -> tuple[int, int] | None:
+    """Return the terminal-cell range occupied by the grapheme at a visible column."""
+    current_col = 0
+    i = 0
+    while i < len(line):
+        ansi = extract_ansi_code(line, i)
+        if ansi:
+            i += ansi.length
+            continue
+        text_end = i
+        while text_end < len(line) and not extract_ansi_code(line, text_end):
+            text_end += 1
+        for segment in _segment_graphemes(line[i:text_end]):
+            width = _grapheme_width(segment)
+            if width > 0 and current_col <= column < current_col + width:
+                return current_col, current_col + width
+            current_col += width
+        i = text_end
+    return None
+
+
+_OSC8_HYPERLINK_RE = re.compile(r"^\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)$")
+
+
+def get_osc8_link_at_column(line: str, column: int) -> str | None:
+    """Return the OSC 8 hyperlink covering a visible terminal column."""
+    active_url: str | None = None
+    current_col = 0
+    i = 0
+    while i < len(line):
+        ansi = extract_ansi_code(line, i)
+        if ansi:
+            hyperlink = _OSC8_HYPERLINK_RE.match(ansi.code)
+            if hyperlink:
+                active_url = hyperlink.group(1) or None
+            i += ansi.length
+            continue
+        text_end = i
+        while text_end < len(line) and not extract_ansi_code(line, text_end):
+            text_end += 1
+        for segment in _segment_graphemes(line[i:text_end]):
+            width = 3 if segment == "\t" else _grapheme_width(segment)
+            if current_col <= column < current_col + width:
+                return active_url
+            current_col += width
+        i = text_end
+    return None
+
+
+_THAI_LAO_AM_RE = re.compile(r"[\u0e33\u0eb3]")
+
+
+def normalize_terminal_output(s: str) -> str:
+    """
+    Normalize text for terminal output without changing logical editor content.
+    Precomposed Thai/Lao AM vowels are decomposed, and visible tabs expand to
+    three spaces so terminal tab stops cannot wrap a logical line.
+    """
+    normalized = s
+    if _THAI_LAO_AM_RE.search(normalized):
+        normalized = _THAI_LAO_AM_RE.sub(
+            lambda m: "\u0e4d\u0e32" if m.group(0) == "\u0e33" else "\u0ecd\u0eb2",
+            normalized,
+        )
+    if "\t" not in normalized:
+        return normalized
+
+    result: list[str] = []
+    i = 0
+    while i < len(normalized):
+        ansi = extract_ansi_code(normalized, i)
+        if ansi:
+            result.append(ansi.code)
+            i += ansi.length
+            continue
+        result.append("   " if normalized[i] == "\t" else normalized[i])
+        i += 1
+    return "".join(result)

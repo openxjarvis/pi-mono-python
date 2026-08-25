@@ -35,6 +35,7 @@ class AutocompleteItem:
 class SlashCommand:
     name: str
     description: str | None = None
+    argument_hint: str | None = None
     get_argument_completions: Callable[[str], list[AutocompleteItem] | None] | None = None
 
 
@@ -202,6 +203,7 @@ class CombinedAutocompleteProvider:
         self.commands = commands or []
         self.base_path = base_path or os.getcwd()
         self.fd_path = fd_path
+        self.trigger_characters: list[str] | None = ["@", "#"]
 
     def get_suggestions(
         self,
@@ -230,8 +232,10 @@ class CombinedAutocompleteProvider:
                 for cmd in self.commands:
                     name = cmd.name if isinstance(cmd, SlashCommand) else cmd.value
                     label = cmd.name if isinstance(cmd, SlashCommand) else cmd.label
-                    desc = cmd.description
-                    cmd_items.append(AutocompleteItem(value=name, label=label, description=desc))
+                    desc = cmd.description or ""
+                    hint = cmd.argument_hint if isinstance(cmd, SlashCommand) else None
+                    full_desc = f"{hint} — {desc}" if hint and desc else (hint or desc or None)
+                    cmd_items.append(AutocompleteItem(value=name, label=label, description=full_desc))
                 filtered = fuzzy_filter(cmd_items, prefix, lambda x: x.value)
                 if not filtered:
                     return None

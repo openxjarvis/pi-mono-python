@@ -1,13 +1,21 @@
 # pi-mono-python
 
-[pi-mono](../pi-mono) TypeScript monorepo 的 Python 移植版本 — 四个包，代码、逻辑、算法和文件夹结构完全对齐。
+[pi-mono](../pi-mono) TypeScript monorepo 的 Python 移植版本 — 与 TypeScript 相同的 `packages/` 树，代码、逻辑、算法和文件夹结构对齐。
+
+**对齐版本：** pi-mono TypeScript **v0.84.3**（2026-08-24）。模块清单见 [`ALIGNMENT.md`](ALIGNMENT.md)（以及 `docs/ALIGNMENT_REPORT_2026-08.md`）。
 
 | TypeScript | Python | 说明 |
 |---|---|---|
 | `@mariozechner/pi-ai` | `pi_ai` | 统一的 LLM 流式层（Google、Anthropic、OpenAI、Bedrock 等） |
 | `@mariozechner/pi-agent-core` | `pi_agent` | 代理循环、工具执行、状态管理 |
-| `@mariozechner/pi-coding-agent` | `pi_coding_agent` | 编码代理 CLI，包含文件工具：read、write、edit、bash、grep、find、ls |
+| `@mariozechner/pi-coding-agent` | `pi_coding_agent` | 编码代理 CLI，包含文件工具：read、write、edit、bash、powershell（Windows）、grep、find、ls |
 | `@mariozechner/pi-tui` | `pi_tui` | 终端 UI 库，具备差异化渲染引擎 |
+| `@earendil-works/pi-telemetry` | `pi_telemetry` | 供应商无关的遥测契约与内存记录器 |
+| `@earendil-works/pi-protocol` | `pi_protocol` | 长度前缀 CBOR 会话协议 |
+| `@earendil-works/pi-client` | `pi_client` | 传输无关的远程会话客户端 |
+| `@earendil-works/pi-server` | `pi_server` | 实验性会话服务端 + Unix 监听器 |
+| `@earendil-works/pi-session-backend-sqlite-node` | `pi_session_backend_sqlite` | SQLite 会话后端（`sqlite3` 对应 `node:sqlite`） |
+| `@earendil-works/pi-evals` | `pi_evals` | 编码代理评测脚手架（pytest 对应 vitest-evals） |
 
 ---
 
@@ -176,10 +184,10 @@ LIVE_TESTS=1 uv run pytest packages/ai/tests/ -v
 
 | 包 | 测试数 | 状态 |
 |---------|-------|--------|
-| `pi_tui` | 135 | ✅ 通过 |
-| `pi_ai` + `pi_agent` | 156 | ✅ 通过（7 个跳过 = 仅实时测试） |
-| `pi_coding_agent` | 287 | ✅ 通过 |
-| **总计** | **578** | **✅ 全部通过** |
+| `pi_tui` + `pi_agent` | — | ✅ 通过 |
+| `pi_ai` | 163 | ✅ 通过（7 个跳过 = 仅实时测试） |
+| `pi_coding_agent` | 305+ | ✅ 通过 |
+| **总计** | **625** | **✅ 全部通过**（7 个跳过） |
 
 ---
 

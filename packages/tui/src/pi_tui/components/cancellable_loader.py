@@ -5,7 +5,7 @@ import asyncio
 import threading
 from typing import TYPE_CHECKING, Callable
 
-from ..keybindings import get_editor_keybindings
+from ..keybindings import get_keybindings
 from .loader import Loader
 
 if TYPE_CHECKING:
@@ -47,8 +47,8 @@ class CancellableLoader(Loader):
         return self._asyncio_event
 
     def handle_input(self, data: str) -> None:
-        kb = get_editor_keybindings()
-        if kb.matches(data, "selectCancel"):
+        kb = get_keybindings()
+        if kb.matches(data, "tui.select.cancel"):
             self._abort_event.set()
             if self._asyncio_event is not None:
                 try:

@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from .text import strip_bom
+
 
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", re.DOTALL)
 
@@ -22,6 +24,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         (metadata, body) where metadata is the parsed YAML dict
         and body is the remaining content after the frontmatter.
     """
+    content = strip_bom(content).replace("\r\n", "\n").replace("\r", "\n")
     match = _FM_RE.match(content)
     if not match:
         return {}, content

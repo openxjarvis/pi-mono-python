@@ -1,0 +1,35 @@
+from .theme import (
+    Theme,
+    detect_terminal_background_from_env,
+    get_available_themes,
+    get_editor_theme,
+    get_markdown_theme,
+    get_theme,
+    get_theme_by_name,
+    highlight_code,
+    init_theme,
+    load_theme_from_path,
+    resolve_theme_setting,
+    set_registered_themes,
+    set_theme,
+    theme,
+)
+from .theme_controller import ThemeController
+
+__all__ = [
+    "Theme",
+    "detect_terminal_background_from_env",
+    "get_available_themes",
+    "get_editor_theme",
+    "get_markdown_theme",
+    "get_theme",
+    "get_theme_by_name",
+    "highlight_code",
+    "init_theme",
+    "load_theme_from_path",
+    "resolve_theme_setting",
+    "set_registered_themes",
+    "set_theme",
+    "theme",
+    "ThemeController",
+]

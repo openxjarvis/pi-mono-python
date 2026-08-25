@@ -1,0 +1,20 @@
+[project]
+name = "pi-session-backend-sqlite"
+version = "0.53.0"
+description = "SQLite session backend — Python equivalent of @earendil-works/pi-session-backend-sqlite-node"
+requires-python = ">=3.11"
+dependencies = ["pi-ai", "pi-agent"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pi_session_backend_sqlite"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/pi_session_backend_sqlite/sqlite/migrations" = "pi_session_backend_sqlite/sqlite/migrations"
+
+[tool.uv.sources]
+pi-ai = { workspace = true }
+pi-agent = { workspace = true }

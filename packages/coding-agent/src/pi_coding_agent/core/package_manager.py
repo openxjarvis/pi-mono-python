@@ -641,6 +641,44 @@ class DefaultPackageManager:
                 f"{' '.join(args)} failed with code {proc.returncode}: {stderr.decode()}"
             )
 
+    def list_configured_packages(self) -> list[dict[str, Any]]:
+        if not self._settings_manager:
+            return []
+        configured: list[dict[str, Any]] = []
+        global_settings = self._settings_manager.get_global_settings()
+        project_settings = self._settings_manager.get_project_settings()
+        for pkg in global_settings.get("packages") or []:
+            source = pkg if isinstance(pkg, str) else pkg.get("source", "")
+            configured.append(
+                {
+                    "source": source,
+                    "scope": "user",
+                    "filtered": isinstance(pkg, dict),
+                    "installedPath": self.get_installed_path(source, "user"),
+                    "installed_path": self.get_installed_path(source, "user"),
+                }
+            )
+        for pkg in project_settings.get("packages") or []:
+            source = pkg if isinstance(pkg, str) else pkg.get("source", "")
+            configured.append(
+                {
+                    "source": source,
+                    "scope": "project",
+                    "filtered": isinstance(pkg, dict),
+                    "installedPath": self.get_installed_path(source, "project"),
+                    "installed_path": self.get_installed_path(source, "project"),
+                }
+            )
+        return configured
+
+    async def install_and_persist(self, source: str, options: dict[str, Any] | None = None) -> None:
+        await self.install(source, options)
+        self.add_source_to_settings(source, options)
+
+    async def remove_and_persist(self, source: str, options: dict[str, Any] | None = None) -> bool:
+        await self.remove(source, options)
+        return self.remove_source_from_settings(source, options)
+
     def add_source_to_settings(self, source: str, options: dict[str, Any] | None = None) -> bool:
         if not self._settings_manager:
             return False

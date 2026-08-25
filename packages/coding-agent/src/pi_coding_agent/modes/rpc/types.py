@@ -83,6 +83,11 @@ class RpcCommandCycleThinkingLevel(BaseModel):
     id: str | None = None
 
 
+class RpcCommandGetAvailableThinkingLevels(BaseModel):
+    type: Literal["get_available_thinking_levels"]
+    id: str | None = None
+
+
 class RpcCommandSetSteeringMode(BaseModel):
     type: Literal["set_steering_mode"]
     id: str | None = None
@@ -152,6 +157,22 @@ class RpcCommandFork(BaseModel):
     entryId: str
 
 
+class RpcCommandClone(BaseModel):
+    type: Literal["clone"]
+    id: str | None = None
+
+
+class RpcCommandGetEntries(BaseModel):
+    type: Literal["get_entries"]
+    id: str | None = None
+    since: str | None = None
+
+
+class RpcCommandGetTree(BaseModel):
+    type: Literal["get_tree"]
+    id: str | None = None
+
+
 class RpcCommandGetForkMessages(BaseModel):
     type: Literal["get_fork_messages"]
     id: str | None = None
@@ -190,6 +211,7 @@ RpcCommand = Union[
     RpcCommandGetAvailableModels,
     RpcCommandSetThinkingLevel,
     RpcCommandCycleThinkingLevel,
+    RpcCommandGetAvailableThinkingLevels,
     RpcCommandSetSteeringMode,
     RpcCommandSetFollowUpMode,
     RpcCommandCompact,
@@ -202,6 +224,9 @@ RpcCommand = Union[
     RpcCommandExportHtml,
     RpcCommandSwitchSession,
     RpcCommandFork,
+    RpcCommandClone,
+    RpcCommandGetEntries,
+    RpcCommandGetTree,
     RpcCommandGetForkMessages,
     RpcCommandGetLastAssistantText,
     RpcCommandSetSessionName,

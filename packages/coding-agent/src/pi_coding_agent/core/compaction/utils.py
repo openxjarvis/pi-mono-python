@@ -26,10 +26,11 @@ def create_file_ops() -> FileOperations:
 
 def extract_file_ops_from_message(message: Any, file_ops: FileOperations) -> None:
     """Extract file operations from tool calls in an assistant message."""
-    if not hasattr(message, "role") or message.role != "assistant":
+    role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
+    if role != "assistant":
         return
 
-    content = getattr(message, "content", None)
+    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
     if not isinstance(content, list):
         return
 

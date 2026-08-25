@@ -1,11 +1,12 @@
 """Input component — mirrors components/input.ts"""
 from __future__ import annotations
 
-from ..keybindings import get_editor_keybindings
+from ..keybindings import get_keybindings
 from ..kill_ring import KillRing
 from ..tui import CURSOR_MARKER
 from ..undo_stack import UndoStack
-from ..utils import _segment_graphemes, is_punctuation_char, is_whitespace_char, visible_width, slice_by_column
+from ..utils import _segment_graphemes, is_whitespace_char, visible_width, slice_by_column
+from ..word_navigation import find_word_backward, find_word_forward
 
 
 class _InputState:
@@ -74,55 +75,55 @@ class Input:
                     self.handle_input(remaining)
             return
 
-        kb = get_editor_keybindings()
+        kb = get_keybindings()
 
-        if kb.matches(data, "selectCancel"):
+        if kb.matches(data, "tui.select.cancel"):
             if self.on_escape:
                 self.on_escape()
             return
 
-        if kb.matches(data, "undo"):
+        if kb.matches(data, "tui.editor.undo"):
             self._undo()
             return
 
-        if kb.matches(data, "submit") or data == "\n":
+        if kb.matches(data, "tui.input.submit") or data == "\n":
             if self.on_submit:
                 self.on_submit(self._value)
             return
 
-        if kb.matches(data, "deleteCharBackward"):
+        if kb.matches(data, "tui.editor.deleteCharBackward"):
             self._handle_backspace()
             return
 
-        if kb.matches(data, "deleteCharForward"):
+        if kb.matches(data, "tui.editor.deleteCharForward"):
             self._handle_forward_delete()
             return
 
-        if kb.matches(data, "deleteWordBackward"):
+        if kb.matches(data, "tui.editor.deleteWordBackward"):
             self._delete_word_backwards()
             return
 
-        if kb.matches(data, "deleteWordForward"):
+        if kb.matches(data, "tui.editor.deleteWordForward"):
             self._delete_word_forward()
             return
 
-        if kb.matches(data, "deleteToLineStart"):
+        if kb.matches(data, "tui.editor.deleteToLineStart"):
             self._delete_to_line_start()
             return
 
-        if kb.matches(data, "deleteToLineEnd"):
+        if kb.matches(data, "tui.editor.deleteToLineEnd"):
             self._delete_to_line_end()
             return
 
-        if kb.matches(data, "yank"):
+        if kb.matches(data, "tui.editor.yank"):
             self._yank()
             return
 
-        if kb.matches(data, "yankPop"):
+        if kb.matches(data, "tui.editor.yankPop"):
             self._yank_pop()
             return
 
-        if kb.matches(data, "cursorLeft"):
+        if kb.matches(data, "tui.editor.cursorLeft"):
             self._last_action = None
             if self._cursor > 0:
                 before = self._value[:self._cursor]
@@ -131,7 +132,7 @@ class Input:
                     self._cursor -= len(graphemes[-1])
             return
 
-        if kb.matches(data, "cursorRight"):
+        if kb.matches(data, "tui.editor.cursorRight"):
             self._last_action = None
             if self._cursor < len(self._value):
                 after = self._value[self._cursor:]
@@ -140,21 +141,21 @@ class Input:
                     self._cursor += len(graphemes[0])
             return
 
-        if kb.matches(data, "cursorLineStart"):
+        if kb.matches(data, "tui.editor.cursorLineStart"):
             self._last_action = None
             self._cursor = 0
             return
 
-        if kb.matches(data, "cursorLineEnd"):
+        if kb.matches(data, "tui.editor.cursorLineEnd"):
             self._last_action = None
             self._cursor = len(self._value)
             return
 
-        if kb.matches(data, "cursorWordLeft"):
+        if kb.matches(data, "tui.editor.cursorWordLeft"):
             self._move_word_backwards()
             return
 
-        if kb.matches(data, "cursorWordRight"):
+        if kb.matches(data, "tui.editor.cursorWordRight"):
             self._move_word_forwards()
             return
 
@@ -285,51 +286,19 @@ class Input:
         if self._cursor == 0:
             return
         self._last_action = None
-        text_before = self._value[:self._cursor]
-        graphemes = _segment_graphemes(text_before)
-
-        while graphemes and is_whitespace_char(graphemes[-1]):
-            self._cursor -= len(graphemes.pop())
-
-        if graphemes:
-            last = graphemes[-1]
-            if is_punctuation_char(last):
-                while graphemes and is_punctuation_char(graphemes[-1]):
-                    self._cursor -= len(graphemes.pop())
-            else:
-                while graphemes and not is_whitespace_char(graphemes[-1]) and not is_punctuation_char(graphemes[-1]):
-                    self._cursor -= len(graphemes.pop())
+        self._cursor = find_word_backward(self._value, self._cursor)
 
     def _move_word_forwards(self) -> None:
         if self._cursor >= len(self._value):
             return
         self._last_action = None
-        text_after = self._value[self._cursor:]
-        graphemes = _segment_graphemes(text_after)
-        idx = 0
-
-        while idx < len(graphemes) and is_whitespace_char(graphemes[idx]):
-            self._cursor += len(graphemes[idx])
-            idx += 1
-
-        if idx < len(graphemes):
-            first = graphemes[idx]
-            if is_punctuation_char(first):
-                while idx < len(graphemes) and is_punctuation_char(graphemes[idx]):
-                    self._cursor += len(graphemes[idx])
-                    idx += 1
-            else:
-                while idx < len(graphemes) and not is_whitespace_char(graphemes[idx]) and not is_punctuation_char(graphemes[idx]):
-                    self._cursor += len(graphemes[idx])
-                    idx += 1
+        self._cursor = find_word_forward(self._value, self._cursor)
 
     def _handle_paste(self, pasted_text: str) -> None:
         self._last_action = None
         self._push_undo()
-        # Convert tabs to spaces (mirrors TS behavior)
-        clean = pasted_text.replace("\t", "    ")
-        # Remove newlines from single-line input
-        clean = clean.replace("\r\n", "").replace("\r", "").replace("\n", "")
+        # Strip newlines first, then expand tabs to 4 spaces (mirrors input.ts)
+        clean = pasted_text.replace("\r\n", "").replace("\r", "").replace("\n", "").replace("\t", "    ")
         self._value = self._value[:self._cursor] + clean + self._value[self._cursor:]
         self._cursor += len(clean)
 

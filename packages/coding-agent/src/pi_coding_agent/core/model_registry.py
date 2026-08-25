@@ -14,8 +14,106 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
+from dataclasses import asdict, is_dataclass
+
 from pi_ai import get_model, get_models, get_providers
-from pi_ai.types import Model
+from pi_ai.types import Model, OpenAICompletionsCompat
+
+_COMPAT_KEY_MAP = {
+    "supportsStore": "supports_store",
+    "supportsDeveloperRole": "supports_developer_role",
+    "supportsReasoningEffort": "supports_reasoning_effort",
+    "reasoningEffortMap": "reasoning_effort_map",
+    "supportsUsageInStreaming": "supports_usage_in_streaming",
+    "supportsFinishReason": "supports_finish_reason",
+    "maxTokensField": "max_tokens_field",
+    "requiresToolResultName": "requires_tool_result_name",
+    "requiresAssistantAfterToolResult": "requires_assistant_after_tool_result",
+    "requiresThinkingAsText": "requires_thinking_as_text",
+    "requiresReasoningContentOnAssistantMessages": "requires_reasoning_content_on_assistant_messages",
+    "thinkingFormat": "thinking_format",
+    "chatTemplateKwargs": "chat_template_kwargs",
+    "chatTemplateArgs": "chat_template_args",
+    "openRouterRouting": "open_router_routing",
+    "vercelGatewayRouting": "vercel_gateway_routing",
+    "zaiToolStream": "zai_tool_stream",
+    "thinkingTokenBudgetField": "thinking_token_budget_field",
+    "supportsThinkingTokenBudget": "supports_thinking_token_budget",
+    "supportsOpenAIGrammarTools": "supports_openai_grammar_tools",
+    "supportsStrictMode": "supports_strict_mode",
+    "cacheControlFormat": "cache_control_format",
+    "sendSessionAffinityHeaders": "send_session_affinity_headers",
+    "deferredToolsMode": "deferred_tools_mode",
+    "sessionAffinityFormat": "session_affinity_format",
+    "supportsLongCacheRetention": "supports_long_cache_retention",
+}
+
+_NESTED_COMPAT_KEYS = {
+    "openRouterRouting",
+    "vercelGatewayRouting",
+    "chatTemplateKwargs",
+    "chatTemplateArgs",
+    "open_router_routing",
+    "vercel_gateway_routing",
+    "chat_template_kwargs",
+    "chat_template_args",
+}
+
+
+def _compat_to_dict(compat: Any) -> dict[str, Any]:
+    if compat is None:
+        return {}
+    if isinstance(compat, dict):
+        return dict(compat)
+    if is_dataclass(compat):
+        return asdict(compat)
+    if hasattr(compat, "model_dump"):
+        return compat.model_dump()
+    return dict(getattr(compat, "__dict__", {}) or {})
+
+
+def _merge_compat(base: Any, override: Any) -> OpenAICompletionsCompat | None:
+    """Deep-merge provider/model compat and normalize to OpenAICompletionsCompat.
+
+    This is how models.json ``supportsFinishReason`` overrides reach the streamer.
+    Mirrors mergeCompat() in TypeScript provider-composer.ts.
+    """
+    if override is None and base is None:
+        return None
+    merged = _compat_to_dict(base)
+    ov = _compat_to_dict(override)
+    for key, value in ov.items():
+        if key in _NESTED_COMPAT_KEYS and isinstance(value, dict):
+            existing = merged.get(key) if isinstance(merged.get(key), dict) else {}
+            # Also look up the snake/camel counterpart
+            alt = _COMPAT_KEY_MAP.get(key, key)
+            if not existing and alt in merged and isinstance(merged[alt], dict):
+                existing = merged[alt]
+            merged[key] = {**existing, **value}
+        else:
+            merged[key] = value
+    return _parse_openai_completions_compat(merged)
+
+
+def _parse_openai_completions_compat(raw: Any) -> OpenAICompletionsCompat | None:
+    if raw is None:
+        return None
+    if isinstance(raw, OpenAICompletionsCompat):
+        return raw
+    if not isinstance(raw, dict):
+        return None
+    fields = OpenAICompletionsCompat.__dataclass_fields__
+    kwargs: dict[str, Any] = {}
+    for key, value in raw.items():
+        snake = _COMPAT_KEY_MAP.get(key, key)
+        if snake in fields:
+            kwargs[snake] = value
+    try:
+        return OpenAICompletionsCompat(**kwargs)
+    except TypeError:
+        return OpenAICompletionsCompat(
+            **{k: v for k, v in kwargs.items() if k in fields}
+        )
 
 
 # ─── Config schema (runtime validation without AJV) ───────────────────────────
@@ -38,11 +136,15 @@ def _validate_models_config(config: Any) -> str | None:
         model_overrides = provider_config.get("modelOverrides") or {}
 
         if not models:
-            # Override-only: needs baseUrl or modelOverrides
-            if not provider_config.get("baseUrl") and not model_overrides:
+            # Override-only: needs baseUrl, modelOverrides, or compat
+            if (
+                not provider_config.get("baseUrl")
+                and not model_overrides
+                and not provider_config.get("compat")
+            ):
                 return (
                     f'Provider {provider_name}: must specify "baseUrl", '
-                    '"modelOverrides", or "models".'
+                    '"modelOverrides", "compat", or "models".'
                 )
         else:
             # Custom models: needs baseUrl + apiKey
@@ -163,10 +265,9 @@ def _apply_model_override(model: Model, override: dict[str, Any]) -> Model:
             base_headers = dict(result.headers) if result.headers else {}
             result = Model(**{**result.__dict__, "headers": {**base_headers, **resolved}})
 
-    # Merge compat
-    if override.get("compat"):
-        base_compat = dict(result.compat) if result.compat else {}
-        result = Model(**{**result.__dict__, "compat": {**base_compat, **override["compat"]}})
+    # Merge compat (provider/model-level supportsFinishReason etc.)
+    if override.get("compat") is not None:
+        result = Model(**{**result.__dict__, "compat": _merge_compat(result.compat, override["compat"])})
 
     return result
 
@@ -261,14 +362,18 @@ class ModelRegistry:
             for model in models:
                 m = model
 
-                # Apply provider-level baseUrl/headers
-                if prov_override.get("baseUrl") or prov_override.get("headers"):
+                # Apply provider-level baseUrl/headers/compat
+                if prov_override.get("baseUrl") or prov_override.get("headers") or prov_override.get("compat"):
                     resolved_hdrs = _resolve_headers(prov_override.get("headers"))
                     base_url = prov_override.get("baseUrl", getattr(m, "base_url", None))
-                    updates: dict[str, Any] = {"base_url": base_url}
+                    updates: dict[str, Any] = {}
+                    if prov_override.get("baseUrl"):
+                        updates["base_url"] = base_url
                     if resolved_hdrs:
                         base_hdrs = dict(m.headers) if m.headers else {}
                         updates["headers"] = {**base_hdrs, **resolved_hdrs}
+                    if prov_override.get("compat") is not None:
+                        updates["compat"] = _merge_compat(m.compat, prov_override["compat"])
                     try:
                         m = Model(**{**m.__dict__, **updates})
                     except Exception:
@@ -312,8 +417,8 @@ class ModelRegistry:
             return [], {}, {}, None
 
         try:
-            with open(path, encoding="utf-8") as f:
-                config = json.load(f)
+            from pi_coding_agent.utils.text import load_json_file
+            config = load_json_file(path)
         except json.JSONDecodeError as e:
             return [], {}, {}, f"Failed to parse models.json: {e}\n\nFile: {path}"
         except OSError as e:
@@ -329,11 +434,17 @@ class ModelRegistry:
 
         for provider_name, prov_cfg in config.get("providers", {}).items():
             # Provider-level overrides for built-in models
-            if prov_cfg.get("baseUrl") or prov_cfg.get("headers") or prov_cfg.get("apiKey"):
+            if (
+                prov_cfg.get("baseUrl")
+                or prov_cfg.get("headers")
+                or prov_cfg.get("apiKey")
+                or prov_cfg.get("compat")
+            ):
                 overrides[provider_name] = {
                     "baseUrl": prov_cfg.get("baseUrl"),
                     "headers": prov_cfg.get("headers"),
                     "apiKey": prov_cfg.get("apiKey"),
+                    "compat": prov_cfg.get("compat"),
                 }
 
             if prov_cfg.get("apiKey"):
@@ -374,7 +485,7 @@ class ModelRegistry:
                         max_tokens=model_def.get("maxTokens", 16384),
                         base_url=prov_cfg.get("baseUrl"),
                         headers=merged_headers,
-                        compat=model_def.get("compat"),
+                        compat=_merge_compat(prov_cfg.get("compat"), model_def.get("compat")),
                     )
                     models.append(m)
                 except Exception:
@@ -408,7 +519,7 @@ class ModelRegistry:
                     max_tokens=model_def.get("maxTokens", 16384),
                     base_url=prov_config.base_url,
                     headers=prov_config.headers,
-                    compat=model_def.get("compat"),
+                    compat=_parse_openai_completions_compat(model_def.get("compat")),
                 )
                 # Check if it replaces an existing entry
                 idx = next(

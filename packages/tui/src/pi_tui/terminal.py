@@ -10,12 +10,35 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Callable
 
 from .keys import set_kitty_protocol_active
 from .stdin_buffer import StdinBuffer
+
+_DEFAULT_ESCAPE_TIMEOUT_MS = 10
+_DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100
+_TERMINAL_PROGRESS_ACTIVE = "\x1b]9;4;3\x07"
+_TERMINAL_PROGRESS_CLEAR = "\x1b]9;4;0\x07"
+_TERMINAL_PROGRESS_KEEPALIVE_MS = 15000
+
+
+def resolve_escape_timeout_ms(env: dict[str, str] | None = None) -> int:
+    """How long to wait before treating a lone ESC as Escape."""
+    source = env if env is not None else os.environ
+    configured = source.get("PI_TUI_ESC_TIMEOUT")
+    if configured:
+        try:
+            value = float(configured)
+            if value > 0:
+                return int(value)
+        except ValueError:
+            pass
+    if source.get("SSH_CONNECTION") or source.get("SSH_TTY"):
+        return _DEFAULT_SSH_ESCAPE_TIMEOUT_MS
+    return _DEFAULT_ESCAPE_TIMEOUT_MS
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Terminal ABC — mirrors Terminal interface in terminal.ts
@@ -93,6 +116,10 @@ class Terminal(ABC):
     def set_title(self, title: str) -> None:
         """Set terminal window title."""
 
+    @abstractmethod
+    def set_progress(self, active: bool) -> None:
+        """OSC 9;4 progress indicator."""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ProcessTerminal — mirrors ProcessTerminal in terminal.ts
@@ -114,6 +141,7 @@ class ProcessTerminal(Terminal):
         self._stdin_buffer: StdinBuffer | None = None
         self._write_log_path = os.environ.get("PI_TUI_WRITE_LOG", "")
         self._old_termios: object | None = None
+        self._progress_timer: threading.Timer | None = None
 
     @property
     def kitty_protocol_active(self) -> bool:
@@ -190,7 +218,10 @@ class ProcessTerminal(Terminal):
 
     def _setup_stdin_buffer(self) -> None:
         """Set up StdinBuffer to split batched input into individual sequences."""
-        self._stdin_buffer = StdinBuffer(timeout_ms=10)
+        self._stdin_buffer = StdinBuffer(
+            timeout_ms=50,
+            escape_timeout_ms=resolve_escape_timeout_ms(),
+        )
         kitty_response_pattern = __import__("re").compile(r"^\x1b\[\?(\d+)u$")
 
         def on_data(sequence: str) -> None:
@@ -268,6 +299,8 @@ class ProcessTerminal(Terminal):
 
     def stop(self) -> None:
         """Disable bracketed paste, Kitty protocol, remove handlers, restore raw mode."""
+        self._clear_progress_keepalive()
+        sys.stdout.write("\x1b]9;4;0\x07")
         sys.stdout.write("\x1b[?2004l")
 
         if self._kitty_protocol_active:
@@ -356,3 +389,30 @@ class ProcessTerminal(Terminal):
     def set_title(self, title: str) -> None:
         sys.stdout.write(f"\x1b]0;{title}\x07")
         sys.stdout.flush()
+
+    def set_progress(self, active: bool) -> None:
+        if active:
+            sys.stdout.write(_TERMINAL_PROGRESS_ACTIVE)
+            sys.stdout.flush()
+            self._arm_progress_keepalive()
+        else:
+            self._clear_progress_keepalive()
+            sys.stdout.write(_TERMINAL_PROGRESS_CLEAR)
+            sys.stdout.flush()
+
+    def _arm_progress_keepalive(self) -> None:
+        self._clear_progress_keepalive()
+
+        def _tick() -> None:
+            sys.stdout.write(_TERMINAL_PROGRESS_ACTIVE)
+            sys.stdout.flush()
+            self._arm_progress_keepalive()
+
+        self._progress_timer = threading.Timer(_TERMINAL_PROGRESS_KEEPALIVE_MS / 1000.0, _tick)
+        self._progress_timer.daemon = True
+        self._progress_timer.start()
+
+    def _clear_progress_keepalive(self) -> None:
+        if self._progress_timer is not None:
+            self._progress_timer.cancel()
+            self._progress_timer = None

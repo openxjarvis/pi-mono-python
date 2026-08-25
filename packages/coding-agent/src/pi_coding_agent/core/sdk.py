@@ -10,12 +10,16 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pi_agent.types import AgentTool, ThinkingLevel
+from pi_ai import clamp_thinking_level
 from pi_ai.types import Model
+
+from pi_coding_agent.core.defaults import DEFAULT_THINKING_LEVEL
 
 from .agent_session import AgentSession
 from .auth_storage import AuthStorage
 from .extensions import ToolDefinition
 from .model_registry import ModelRegistry
+from .model_resolver import find_initial_model, restore_model_from_session
 from .session_manager import SessionManager
 from .settings_manager import Settings, SettingsManager
 
@@ -135,34 +139,62 @@ async def create_agent_session(
     if not model and has_existing_session:
         saved_model = existing_session.model
         if saved_model:
-            try:
-                from pi_ai import get_model
-                restored_model = get_model(saved_model["provider"], saved_model["model_id"])
-                if model_registry.get_api_key(saved_model["provider"]):
-                    model = restored_model
-            except Exception:
-                model_fallback_message = f"Could not restore model {saved_model['provider']}/{saved_model['model_id']}"
-    
-    # If still no model, use default
+            provider = saved_model.get("provider") if isinstance(saved_model, dict) else None
+            model_id = saved_model.get("model_id") if isinstance(saved_model, dict) else None
+            if provider and model_id:
+                model, model_fallback_message = await restore_model_from_session(
+                    provider, model_id, None, model_registry
+                )
+
+    # If still no model, use find_initial_model (settings default, then provider defaults)
     if not model:
-        try:
-            model = model_registry.resolve_model(
-                model_id=settings_manager.get_default_model(),
-                provider=settings_manager.get_default_provider(),
-            )
-        except Exception:
-            pass
+        initial = await find_initial_model(
+            is_continuing=has_existing_session,
+            default_provider=settings_manager.get_default_provider(),
+            default_model_id=settings_manager.get_default_model(),
+            default_thinking_level=settings_manager.get_default_thinking_level(),
+            model_thinking_levels=settings_manager.get_all_model_thinking_levels(),
+            model_registry=model_registry,
+        )
+        model = initial.model
+        if initial.fallback_message:
+            if model_fallback_message:
+                model_fallback_message = f"{model_fallback_message}. {initial.fallback_message}"
+            else:
+                model_fallback_message = initial.fallback_message
+        # Tests and unauthenticated local use still need a built-in model.
+        if not model:
+            try:
+                model = model_registry.resolve_model(
+                    model_id=settings_manager.get_default_model(),
+                    provider=settings_manager.get_default_provider(),
+                )
+            except Exception:
+                pass
     
+    has_thinking_entry = any(
+        getattr(e, "type", None) == "thinking_level_change"
+        for e in session_manager.get_branch()
+    )
+
     thinking_level = options.thinking_level
+    if thinking_level is None and has_existing_session:
+        thinking_level = (
+            existing_session.thinking_level
+            if has_thinking_entry
+            else (settings_manager.get_default_thinking_level() or DEFAULT_THINKING_LEVEL)
+        )
+    if thinking_level is None and model is not None:
+        per_model = settings_manager.get_model_thinking_level(model.provider, model.id)
+        if per_model:
+            thinking_level = per_model
     if thinking_level is None:
-        # Restore from session or use settings default
-        if has_existing_session:
-            thinking_level = existing_session.thinking_level or "medium"
-        else:
-            thinking_level = settings_manager.get_default_thinking_level() or "medium"
-    
-    # Clamp to model capabilities
-    if not model or not getattr(model, "reasoning", False):
+        thinking_level = settings_manager.get_default_thinking_level() or DEFAULT_THINKING_LEVEL
+
+    # Clamp to model capabilities (mirrors clampThinkingLevel in TypeScript)
+    if model:
+        thinking_level = clamp_thinking_level(model, thinking_level)
+    else:
         thinking_level = "off"
     
     settings = Settings(

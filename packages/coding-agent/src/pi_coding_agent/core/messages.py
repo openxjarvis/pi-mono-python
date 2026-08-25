@@ -120,6 +120,24 @@ def create_custom_message(
     )
 
 
+def _msg_role(m: Any) -> str | None:
+    if isinstance(m, dict):
+        return m.get("role")
+    return getattr(m, "role", None)
+
+
+def _msg_get(m: Any, *names: str, default: Any = None) -> Any:
+    if isinstance(m, dict):
+        for name in names:
+            if name in m:
+                return m[name]
+        return default
+    for name in names:
+        if hasattr(m, name):
+            return getattr(m, name)
+    return default
+
+
 def convert_to_llm(messages: list[Any]) -> list[dict[str, Any]]:
     """
     Transform AgentMessages (including custom types) to LLM-compatible messages.
@@ -133,43 +151,59 @@ def convert_to_llm(messages: list[Any]) -> list[dict[str, Any]]:
     """
     result: list[dict[str, Any]] = []
     for m in messages:
-        role = getattr(m, "role", None)
+        role = _msg_role(m)
 
         if role == "bashExecution":
-            if getattr(m, "exclude_from_context", False):
+            if _msg_get(m, "exclude_from_context", "excludeFromContext", default=False):
                 continue
+            if isinstance(m, dict):
+                bash_msg = BashExecutionMessage(
+                    command=_msg_get(m, "command", default=""),
+                    output=_msg_get(m, "output", default=""),
+                    exit_code=_msg_get(m, "exit_code", "exitCode"),
+                    cancelled=bool(_msg_get(m, "cancelled", default=False)),
+                    truncated=bool(_msg_get(m, "truncated", default=False)),
+                    full_output_path=_msg_get(m, "full_output_path", "fullOutputPath"),
+                    timestamp=_msg_get(m, "timestamp", default=0) or 0,
+                )
+            else:
+                bash_msg = m
             result.append({
                 "role": "user",
-                "content": [{"type": "text", "text": bash_execution_to_text(m)}],
-                "timestamp": getattr(m, "timestamp", 0),
+                "content": [{"type": "text", "text": bash_execution_to_text(bash_msg)}],
+                "timestamp": _msg_get(m, "timestamp", default=0),
             })
 
         elif role == "custom":
-            content = m.content
+            content = _msg_get(m, "content", default="")
             if isinstance(content, str):
                 content = [{"type": "text", "text": content}]
             result.append({
                 "role": "user",
                 "content": content,
-                "timestamp": getattr(m, "timestamp", 0),
+                "timestamp": _msg_get(m, "timestamp", default=0),
             })
 
         elif role == "branchSummary":
+            summary = _msg_get(m, "summary", default="")
             result.append({
                 "role": "user",
-                "content": [{"type": "text", "text": BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX}],
-                "timestamp": getattr(m, "timestamp", 0),
+                "content": [{"type": "text", "text": BRANCH_SUMMARY_PREFIX + summary + BRANCH_SUMMARY_SUFFIX}],
+                "timestamp": _msg_get(m, "timestamp", default=0),
             })
 
         elif role == "compactionSummary":
+            summary = _msg_get(m, "summary", default="")
             result.append({
                 "role": "user",
-                "content": [{"type": "text", "text": COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX}],
-                "timestamp": getattr(m, "timestamp", 0),
+                "content": [{"type": "text", "text": COMPACTION_SUMMARY_PREFIX + summary + COMPACTION_SUMMARY_SUFFIX}],
+                "timestamp": _msg_get(m, "timestamp", default=0),
             })
 
         elif role in ("user", "assistant", "toolResult"):
-            if hasattr(m, "model_dump"):
+            if isinstance(m, dict):
+                result.append(m)
+            elif hasattr(m, "model_dump"):
                 result.append(m.model_dump())
             elif hasattr(m, "__dict__"):
                 result.append(dict(m.__dict__))

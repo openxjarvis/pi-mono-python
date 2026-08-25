@@ -25,6 +25,7 @@ class CompactionSettings:
 @dataclass
 class BranchSummarySettings:
     reserve_tokens: int | None = None    # default: 16384
+    skip_prompt: bool | None = None      # default: False
 
 
 @dataclass
@@ -73,7 +74,9 @@ class Settings:
     default_provider: str | None = None
     default_model: str | None = None
     default_thinking_level: str | None = None  # off|minimal|low|medium|high|xhigh
-    transport: str | None = None               # "sse" | "websocket"
+    model_thinking_levels: dict[str, str] | None = None  # keyed by "provider/modelId"
+    transport: str | None = None               # "auto" | "sse" | "websocket"
+    default_tools: list[str] | None = None
     steering_mode: str | None = "one-at-a-time"  # "all" | "one-at-a-time"
     follow_up_mode: str | None = "one-at-a-time"  # "all" | "one-at-a-time"
     theme: str | None = None
@@ -191,6 +194,18 @@ def migrate_settings(raw: dict[str, Any]) -> dict[str, Any]:
         else:
             raw.pop("skills", None)
 
+    # retry.maxDelayMs → retry.provider.maxRetryDelayMs
+    retry = raw.get("retry")
+    if isinstance(retry, dict):
+        provider = retry.get("provider")
+        provider_settings = provider if isinstance(provider, dict) else {}
+        if (
+            isinstance(retry.get("maxDelayMs"), (int, float))
+            and provider_settings.get("maxRetryDelayMs") is None
+        ):
+            retry["provider"] = {**provider_settings, "maxRetryDelayMs": retry["maxDelayMs"]}
+        retry.pop("maxDelayMs", None)
+
     return raw
 
 
@@ -231,6 +246,7 @@ class SettingsManager:
         self._write_lock = asyncio.Lock()
         self._runtime_overrides: dict[str, Any] = {}
         self._loaded = False
+        self._project_trusted = True
 
     @classmethod
     def create(
@@ -270,8 +286,8 @@ class SettingsManager:
         if not os.path.exists(path):
             return {}
         try:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
+            from pi_coding_agent.utils.text import load_json_file
+            raw = load_json_file(path)
             if not isinstance(raw, dict):
                 return {}
             return migrate_settings(raw)
@@ -350,6 +366,20 @@ class SettingsManager:
         self._ensure_loaded()
         return dict(self._project_raw)
 
+    def is_project_trusted(self) -> bool:
+        return self._project_trusted
+
+    def set_project_trusted(self, trusted: bool) -> None:
+        if self._project_trusted == trusted:
+            return
+        self._project_trusted = trusted
+        if not trusted:
+            self._project_raw = {}
+            self._rebuild()
+            return
+        self._project_raw = self._load_file(self._project_settings_file)
+        self._rebuild()
+
     def drain_errors(self) -> list[dict[str, Any]]:
         """Drain and return all accumulated settings errors."""
         drained = list(self._errors)
@@ -363,6 +393,8 @@ class SettingsManager:
             "defaultProvider": "default_provider",
             "defaultModel": "default_model",
             "defaultThinkingLevel": "default_thinking_level",
+            "modelThinkingLevels": "model_thinking_levels",
+            "defaultTools": "default_tools",
             "steeringMode": "steering_mode",
             "followUpMode": "follow_up_mode",
             "hideThinkingBlock": "hide_thinking_block",
@@ -401,13 +433,49 @@ class SettingsManager:
         self._ensure_loaded()
         return self._merged.get("defaultThinkingLevel") or self._merged.get("default_thinking_level")
 
+    def set_default_thinking_level(self, level: str) -> None:
+        """Persist the global default thinking level."""
+        self.save_global("defaultThinkingLevel", level)
+
+    def get_model_thinking_level(self, provider: str, model_id: str) -> str | None:
+        """Per-model thinking override keyed by provider/modelId."""
+        levels = self.get_all_model_thinking_levels()
+        return levels.get(f"{provider}/{model_id}")
+
+    def get_all_model_thinking_levels(self) -> dict[str, str]:
+        self._ensure_loaded()
+        raw = self._merged.get("modelThinkingLevels") or self._merged.get("model_thinking_levels") or {}
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def set_model_thinking_level(self, provider: str, model_id: str, level: str) -> None:
+        self._ensure_loaded()
+        levels = dict(self._global_raw.get("modelThinkingLevels") or {})
+        levels[f"{provider}/{model_id}"] = level
+        self.save_global("modelThinkingLevels", levels)
+
+    def remove_model_thinking_level(self, provider: str, model_id: str) -> None:
+        self._ensure_loaded()
+        levels = dict(self._global_raw.get("modelThinkingLevels") or {})
+        levels.pop(f"{provider}/{model_id}", None)
+        if levels:
+            self.save_global("modelThinkingLevels", levels)
+        elif "modelThinkingLevels" in self._global_raw:
+            del self._global_raw["modelThinkingLevels"]
+            self._rebuild()
+            self._write_file(self._global_settings_file, self._global_raw)
+
+    def get_default_tools(self) -> list[str] | None:
+        self._ensure_loaded()
+        val = self._merged.get("defaultTools") or self._merged.get("default_tools")
+        return list(val) if isinstance(val, list) else None
+
     def get_theme(self) -> str | None:
         self._ensure_loaded()
         return self._merged.get("theme")
 
     def get_transport(self) -> str:
         self._ensure_loaded()
-        return self._merged.get("transport", "sse")
+        return self._merged.get("transport") or "auto"
 
     def get_steering_mode(self) -> str:
         self._ensure_loaded()
@@ -416,6 +484,12 @@ class SettingsManager:
     def get_follow_up_mode(self) -> str:
         self._ensure_loaded()
         return self._merged.get("followUpMode") or self._merged.get("follow_up_mode", "one-at-a-time")
+
+    def set_steering_mode(self, mode: str) -> None:
+        self.save_global("steeringMode", mode)
+
+    def set_follow_up_mode(self, mode: str) -> None:
+        self.save_global("followUpMode", mode)
 
     def get_quiet_startup(self) -> bool:
         self._ensure_loaded()
@@ -453,10 +527,9 @@ class SettingsManager:
     def set_block_images(self, blocked: bool) -> None:
         """Set whether images should be blocked from being sent to LLM providers."""
         self._ensure_loaded()
-        if "images" not in self._global_raw:
-            self._global_raw["images"] = {}
-        self._global_raw["images"]["blockImages"] = blocked
-        self.save_global()
+        images = dict(self._global_raw.get("images") or {})
+        images["blockImages"] = blocked
+        self.save_global("images", images)
 
     def get_retry_settings(self) -> dict[str, Any]:
         self._ensure_loaded()
@@ -534,6 +607,71 @@ class SettingsManager:
         self._ensure_loaded()
         val = self._merged.get("themes") or []
         return list(val) if isinstance(val, list) else []
+
+    def _merged_get(self, camel: str, snake: str, default: Any = None) -> Any:
+        self._ensure_loaded()
+        if camel in self._merged and self._merged[camel] is not None:
+            return self._merged[camel]
+        if snake in self._merged and self._merged[snake] is not None:
+            return self._merged[snake]
+        return default
+
+    def get_tui_mode(self) -> str:
+        mode = self._merged_get("tuiMode", "tui_mode", "regular")
+        return mode if mode in ("regular", "fullscreen") else "regular"
+
+    def get_show_hardware_cursor(self) -> bool:
+        return bool(self._merged_get("showHardwareCursor", "show_hardware_cursor", False))
+
+    def get_clear_on_shrink(self) -> bool:
+        terminal = self.get_terminal_settings()
+        return bool(terminal.get("clearOnShrink", False))
+
+    def get_hide_thinking_block(self) -> bool:
+        return bool(self._merged_get("hideThinkingBlock", "hide_thinking_block", False))
+
+    def get_output_pad(self) -> int:
+        value = self._merged_get("outputPad", "output_pad", 1)
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 1
+
+    def get_editor_padding_x(self) -> int:
+        value = self._merged_get("editorPaddingX", "editor_padding_x", 1)
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 1
+
+    def get_autocomplete_max_visible(self) -> int:
+        value = self._merged_get("autocompleteMaxVisible", "autocomplete_max_visible", 5)
+        try:
+            return max(3, min(20, int(value)))
+        except (TypeError, ValueError):
+            return 5
+
+    def get_fullscreen_scrollbar(self) -> str:
+        value = self._merged_get("fullscreenScrollbar", "fullscreen_scrollbar", "auto")
+        return value if value in ("hidden", "auto", "always") else "auto"
+
+    def get_fullscreen_exit_output(self) -> str:
+        value = self._merged_get("fullscreenExitOutput", "fullscreen_exit_output", "none")
+        return value if value in ("none", "transcript") else "none"
+
+    def get_collapse_changelog(self) -> bool:
+        return bool(self._merged_get("collapseChangelog", "collapse_changelog", False))
+
+    def get_last_changelog_version(self) -> str | None:
+        return self._merged_get("lastChangelogVersion", "last_changelog_version")
+
+    def get_show_terminal_progress(self) -> bool:
+        terminal = self.get_terminal_settings()
+        return bool(terminal.get("showProgress", True))
+
+    def get_mermaid_rendering_mode(self) -> str:
+        markdown = self.get_markdown_settings()
+        return str(markdown.get("mermaid", "off"))
 
     # ── Typed setters ─────────────────────────────────────────────────────────
 

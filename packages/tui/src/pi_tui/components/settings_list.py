@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Callable, TYPE_CHECKING
 
 from ..fuzzy import fuzzy_filter
-from ..keybindings import get_editor_keybindings
+from ..keybindings import get_keybindings
 from ..utils import truncate_to_width, visible_width, wrap_text_with_ansi
 from .input import Input
 
@@ -147,30 +147,30 @@ class SettingsList:
             self._submenu.handle_input(data)  # type: ignore[union-attr]
             return
 
-        kb = get_editor_keybindings()
+        kb = get_keybindings()
         display_items = self._filtered_items if self._search_enabled else self._items
 
-        if kb.matches(data, "selectUp"):
+        if kb.matches(data, "tui.select.up"):
             if display_items:
                 self._selected_index = (
                     len(display_items) - 1 if self._selected_index == 0
                     else self._selected_index - 1
                 )
-        elif kb.matches(data, "selectDown"):
+        elif kb.matches(data, "tui.select.down"):
             if display_items:
                 self._selected_index = (
                     0 if self._selected_index == len(display_items) - 1
                     else self._selected_index + 1
                 )
-        elif kb.matches(data, "selectConfirm") or data == " ":
+        elif kb.matches(data, "tui.select.confirm") or (
+            data == " " and (not self._search_enabled or not (self._search_input and self._search_input.get_value()))
+        ):
             self._activate_item()
-        elif kb.matches(data, "selectCancel"):
+        elif kb.matches(data, "tui.select.cancel"):
             self._on_cancel()
         elif self._search_enabled and self._search_input:
-            sanitized = data.replace(" ", "")
-            if not sanitized:
-                return
-            self._search_input.handle_input(sanitized)
+            # Keep spaces so multi-word labels remain filterable.
+            self._search_input.handle_input(data)
             self._apply_filter(self._search_input.get_value())
 
     def _activate_item(self) -> None:

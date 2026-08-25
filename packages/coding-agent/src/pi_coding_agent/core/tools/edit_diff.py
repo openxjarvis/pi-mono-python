@@ -226,6 +226,33 @@ def generate_diff_string(
     )
 
 
+@dataclass
+class Edit:
+    old_text: str
+    new_text: str
+
+
+@dataclass
+class AppliedEditsResult:
+    base_content: str
+    new_content: str
+
+
+def apply_edits_to_normalized_content(normalized_content: str, edits: list[Edit], path: str) -> AppliedEditsResult:
+    """Apply one or more replacements to LF-normalized content (TS applyEditsToNormalizedContent)."""
+    from pi_agent.harness.tools.edit_diff import (
+        Edit as HarnessEdit,
+        apply_edits_to_normalized_content as harness_apply,
+    )
+
+    result = harness_apply(
+        normalized_content,
+        [HarnessEdit(edit.old_text, edit.new_text) for edit in edits],
+        path,
+    )
+    return AppliedEditsResult(result.base_content, result.new_content)
+
+
 async def compute_edit_diff(
     path: str,
     old_text: str,

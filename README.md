@@ -1,6 +1,8 @@
 # pi-mono-python
 
-> Python port of the [pi-mono](../pi-mono) TypeScript monorepo — four packages with aligned code, logic, algorithms, and folder structure.
+> Python port of the [pi-mono](../pi-mono) TypeScript monorepo — same `packages/` tree, aligned code, logic, algorithms, and folder structure.
+>
+> **Aligned to:** pi-mono TypeScript **v0.84.3** (2026-08-24). See [`ALIGNMENT.md`](ALIGNMENT.md) (and `docs/ALIGNMENT_REPORT_2026-08.md`) for the module inventory.
 >
 > **[中文 README →](README_CN.md)**
 
@@ -8,8 +10,14 @@
 |---|---|---|
 | `@mariozechner/pi-ai` | `pi_ai` | Unified LLM streaming layer (Google, Anthropic, OpenAI, Bedrock, …) |
 | `@mariozechner/pi-agent-core` | `pi_agent` | Agent loop, tool execution, state management |
-| `@mariozechner/pi-coding-agent` | `pi_coding_agent` | Coding agent CLI with file tools: read, write, edit, bash, grep, find, ls |
+| `@mariozechner/pi-coding-agent` | `pi_coding_agent` | Coding agent CLI with file tools: read, write, edit, bash, powershell (Windows), grep, find, ls |
 | `@mariozechner/pi-tui` | `pi_tui` | Terminal UI library with differential rendering engine |
+| `@earendil-works/pi-telemetry` | `pi_telemetry` | Vendor-neutral telemetry contracts and in-memory recorder |
+| `@earendil-works/pi-protocol` | `pi_protocol` | Length-prefixed CBOR session protocol |
+| `@earendil-works/pi-client` | `pi_client` | Transport-neutral remote session client |
+| `@earendil-works/pi-server` | `pi_server` | Experimental session server + Unix listener |
+| `@earendil-works/pi-session-backend-sqlite-node` | `pi_session_backend_sqlite` | SQLite session backend (`sqlite3` equivalent of `node:sqlite`) |
+| `@earendil-works/pi-evals` | `pi_evals` | Coding-agent eval harness (pytest equivalent of vitest-evals) |
 
 ---
 
@@ -131,7 +139,7 @@ Type `/` in the interactive TUI to see available commands:
 | Command | Description |
 |---------|-------------|
 | `/model <name>` | Switch to a different model |
-| `/thinking <level>` | Set thinking detail: `minimal` · `low` · `medium` · `high` · `xhigh` |
+| `/thinking <level>` | Set thinking detail: `minimal` · `low` · `medium` · `high` · `xhigh` · `max` |
 | `/compact` | Compress conversation context to save tokens |
 | `/session` | Show session statistics (tokens used, cost estimate) |
 | `/tools` | List all active tools available to the agent |
@@ -178,10 +186,10 @@ LIVE_TESTS=1 uv run pytest packages/ai/tests/ -v
 
 | Package | Tests | Status |
 |---------|-------|--------|
-| `pi_tui` | 135 | ✅ passed |
-| `pi_ai` + `pi_agent` | 156 | ✅ passed (7 skipped = live-only) |
-| `pi_coding_agent` | 287 | ✅ passed |
-| **Total** | **578** | **✅ all passing** |
+| `pi_tui` + `pi_agent` | — | ✅ passed |
+| `pi_ai` | — | ✅ passed (7 skipped = live-only) |
+| `pi_coding_agent` | — | ✅ passed |
+| **Total** | **720** | **✅ all passing** (7 skipped) |
 
 ---
 

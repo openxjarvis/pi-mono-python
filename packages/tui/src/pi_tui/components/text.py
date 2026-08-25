@@ -59,11 +59,13 @@ class Text:
             return result
 
         normalized = self._text.replace("\t", "   ")
-        content_width = max(1, width - self._padding_x * 2)
+        # Shrink horizontal padding on narrow terminals so content still fits.
+        padding_x = min(self._padding_x, max(0, (width - 1) // 2))
+        content_width = max(1, width - padding_x * 2)
         wrapped = wrap_text_with_ansi(normalized, content_width)
 
-        left_margin = " " * self._padding_x
-        right_margin = " " * self._padding_x
+        left_margin = " " * padding_x
+        right_margin = " " * padding_x
         content_lines: list[str] = []
 
         for ln in wrapped:

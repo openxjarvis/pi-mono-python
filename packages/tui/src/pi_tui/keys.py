@@ -119,6 +119,26 @@ class _KeyHelper:
     def ctrl_shift_alt(key: str) -> str:
         return f"ctrl+shift+alt+{key}"
 
+    @staticmethod
+    def super(key: str) -> str:
+        return f"super+{key}"
+
+    @staticmethod
+    def ctrl_super(key: str) -> str:
+        return f"ctrl+super+{key}"
+
+    @staticmethod
+    def shift_super(key: str) -> str:
+        return f"shift+super+{key}"
+
+    @staticmethod
+    def alt_super(key: str) -> str:
+        return f"alt+super+{key}"
+
+    @staticmethod
+    def ctrl_shift_super(key: str) -> str:
+        return f"ctrl+shift+super+{key}"
+
 
 KEY = _KeyHelper()
 
@@ -135,10 +155,11 @@ SYMBOL_KEYS: frozenset[str] = frozenset([
 _MOD_SHIFT = 1
 _MOD_ALT = 2
 _MOD_CTRL = 4
+_MOD_SUPER = 8
 _LOCK_MASK = 64 + 128
 
-# Supported modifier bits: Shift, Alt, Ctrl (plus lock bits)
-_SUPPORTED_MOD_MASK = _MOD_SHIFT | _MOD_ALT | _MOD_CTRL | _LOCK_MASK
+# Supported modifier bits: Shift, Alt, Ctrl, Super (plus lock bits)
+_SUPPORTED_MOD_MASK = _MOD_SHIFT | _MOD_ALT | _MOD_CTRL | _MOD_SUPER | _LOCK_MASK
 # Modifier bits allowed for Kitty printable characters (only Shift + locks)
 _KITTY_PRINTABLE_ALLOWED_MODIFIERS = _MOD_SHIFT | _LOCK_MASK
 
@@ -455,8 +476,8 @@ def _parse_modify_other_keys_sequence(data: str) -> tuple[int, int] | None:
 # Key ID parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _parse_key_id(key_id: str) -> tuple[str, bool, bool, bool] | None:
-    """Return (key, ctrl, shift, alt) or None."""
+def _parse_key_id(key_id: str) -> tuple[str, bool, bool, bool, bool] | None:
+    """Return (key, ctrl, shift, alt, super) or None."""
     parts = key_id.lower().split("+")
     key = parts[-1] if parts else ""
     if not key:
@@ -464,7 +485,8 @@ def _parse_key_id(key_id: str) -> tuple[str, bool, bool, bool] | None:
     ctrl = "ctrl" in parts
     shift = "shift" in parts
     alt = "alt" in parts
-    return key, ctrl, shift, alt
+    super_mod = "super" in parts
+    return key, ctrl, shift, alt, super_mod
 
 
 def _raw_ctrl_char(key: str) -> str | None:
@@ -490,7 +512,7 @@ def matches_key(data: str, key_id: KeyId) -> bool:
     parsed = _parse_key_id(key_id)
     if not parsed:
         return False
-    key, ctrl, shift, alt = parsed
+    key, ctrl, shift, alt, super_mod = parsed
 
     modifier = 0
     if shift:
@@ -499,6 +521,8 @@ def matches_key(data: str, key_id: KeyId) -> bool:
         modifier |= _MOD_ALT
     if ctrl:
         modifier |= _MOD_CTRL
+    if super_mod:
+        modifier |= _MOD_SUPER
 
     if key in ("escape", "esc"):
         if modifier != 0:
@@ -516,11 +540,18 @@ def matches_key(data: str, key_id: KeyId) -> bool:
         return _matches_kitty(data, _CP_SPACE, modifier)
 
     if key == "tab":
-        if shift and not ctrl and not alt:
-            return data == "\x1b[Z" or _matches_kitty(data, _CP_TAB, _MOD_SHIFT)
+        if shift and not ctrl and not alt and not super_mod:
+            return (
+                data == "\x1b[Z" or
+                _matches_kitty(data, _CP_TAB, _MOD_SHIFT) or
+                _matches_modify_other_keys(data, _CP_TAB, _MOD_SHIFT)
+            )
         if modifier == 0:
             return data == "\t" or _matches_kitty(data, _CP_TAB, 0)
-        return _matches_kitty(data, _CP_TAB, modifier)
+        return (
+            _matches_kitty(data, _CP_TAB, modifier) or
+            _matches_modify_other_keys(data, _CP_TAB, modifier)
+        )
 
     if key in ("enter", "return"):
         if shift and not ctrl and not alt:
@@ -695,11 +726,11 @@ def matches_key(data: str, key_id: KeyId) -> bool:
         if ctrl and alt and not shift and not _kitty_protocol_active and raw_ctrl:
             return data == f"\x1b{raw_ctrl}"
 
-        if alt and not ctrl and not shift and not _kitty_protocol_active and "a" <= key <= "z":
+        if alt and not ctrl and not shift and not super_mod and not _kitty_protocol_active:
             if data == f"\x1b{key}":
                 return True
 
-        if ctrl and not shift and not alt:
+        if ctrl and not shift and not alt and not super_mod:
             if raw_ctrl and data == raw_ctrl:
                 return True
             return _matches_kitty(data, codepoint, _MOD_CTRL)
@@ -741,8 +772,8 @@ def parse_key(data: str) -> str | None:
     if kitty:
         cp = kitty.codepoint
         mod = kitty.modifier & ~_LOCK_MASK
-        # Reject unsupported modifier bits (Super, Meta, Hyper, etc.)
-        if (mod & ~(_MOD_SHIFT | _MOD_ALT | _MOD_CTRL)) != 0:
+        # Reject unsupported modifier bits (Meta, Hyper, etc. — Super is supported)
+        if (mod & ~(_MOD_SHIFT | _MOD_ALT | _MOD_CTRL | _MOD_SUPER)) != 0:
             return None
         mods: list[str] = []
         if mod & _MOD_SHIFT:
@@ -751,6 +782,8 @@ def parse_key(data: str) -> str | None:
             mods.append("ctrl")
         if mod & _MOD_ALT:
             mods.append("alt")
+        if mod & _MOD_SUPER:
+            mods.append("super")
 
         is_latin = 97 <= cp <= 122
         is_known_sym = chr(cp) in SYMBOL_KEYS if 0 <= cp <= 0xFFFF else False
@@ -802,7 +835,7 @@ def parse_key(data: str) -> str | None:
     if modify_other:
         cp, mod = modify_other
         mod = mod & ~_LOCK_MASK
-        if (mod & ~(_MOD_SHIFT | _MOD_ALT | _MOD_CTRL)) != 0:
+        if (mod & ~(_MOD_SHIFT | _MOD_ALT | _MOD_CTRL | _MOD_SUPER)) != 0:
             return None
         mods: list[str] = []
         if mod & _MOD_SHIFT:
@@ -811,7 +844,9 @@ def parse_key(data: str) -> str | None:
             mods.append("ctrl")
         if mod & _MOD_ALT:
             mods.append("alt")
-        
+        if mod & _MOD_SUPER:
+            mods.append("super")
+
         key_name: str | None = None
         if cp == _CP_ENTER:
             key_name = "enter"
@@ -877,7 +912,7 @@ def parse_key(data: str) -> str | None:
         code = ord(data[1])
         if 1 <= code <= 26:
             return f"ctrl+alt+{chr(code + 96)}"
-        if 97 <= code <= 122:
+        if 97 <= code <= 122 or 48 <= code <= 57 or chr(code) in SYMBOL_KEYS:
             return f"alt+{chr(code)}"
 
     if data == "\x1b[A":

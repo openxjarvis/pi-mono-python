@@ -1,0 +1,26 @@
+[project]
+name = "pi-evals"
+version = "0.53.0"
+description = "Eval harness for pi coding-agent — Python mirror of @earendil-works/pi-evals"
+requires-python = ">=3.11"
+dependencies = [
+    "pi-ai",
+    "pi-coding-agent",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pi_evals"]
+
+[tool.uv.sources]
+pi-ai = { workspace = true }
+pi-coding-agent = { workspace = true }

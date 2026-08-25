@@ -49,7 +49,7 @@ class ImageDimensions:
 
 
 class ImageRenderOptions:
-    __slots__ = ("max_width_cells", "max_height_cells", "preserve_aspect_ratio", "image_id")
+    __slots__ = ("max_width_cells", "max_height_cells", "preserve_aspect_ratio", "image_id", "move_cursor")
 
     def __init__(
         self,
@@ -57,11 +57,81 @@ class ImageRenderOptions:
         max_height_cells: int | None = None,
         preserve_aspect_ratio: bool = True,
         image_id: int | None = None,
+        move_cursor: bool = True,
     ) -> None:
         self.max_width_cells = max_width_cells
         self.max_height_cells = max_height_cells
         self.preserve_aspect_ratio = preserve_aspect_ratio
         self.image_id = image_id
+        self.move_cursor = move_cursor
+
+
+class ImageCellSize:
+    __slots__ = ("columns", "rows")
+
+    def __init__(self, columns: int, rows: int) -> None:
+        self.columns = columns
+        self.rows = rows
+
+
+class KittyImageMetadata(ImageCellSize):
+    __slots__ = ("image_id", "width_px", "height_px")
+
+    def __init__(
+        self,
+        image_id: int,
+        columns: int,
+        rows: int,
+        width_px: int,
+        height_px: int,
+    ) -> None:
+        super().__init__(columns, rows)
+        self.image_id = image_id
+        self.width_px = width_px
+        self.height_px = height_px
+
+
+class _RegisteredKittyImageMetadata(KittyImageMetadata):
+    __slots__ = ("transmission_generation",)
+
+    def __init__(
+        self,
+        image_id: int,
+        columns: int,
+        rows: int,
+        width_px: int,
+        height_px: int,
+        transmission_generation: int,
+    ) -> None:
+        super().__init__(image_id, columns, rows, width_px, height_px)
+        self.transmission_generation = transmission_generation
+
+
+class KittyImagePlacement:
+    __slots__ = (
+        "image_id",
+        "transmission_generation",
+        "transmission_bytes",
+        "estimated_decoded_bytes",
+        "sequence",
+        "replacement_line",
+    )
+
+    def __init__(
+        self,
+        image_id: int,
+        transmission_generation: int,
+        transmission_bytes: int,
+        estimated_decoded_bytes: int,
+        sequence: str,
+        replacement_line: str,
+    ) -> None:
+        self.image_id = image_id
+        self.transmission_generation = transmission_generation
+        self.transmission_bytes = transmission_bytes
+        self.estimated_decoded_bytes = estimated_decoded_bytes
+        self.sequence = sequence
+        self.replacement_line = replacement_line
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -92,8 +162,16 @@ def reset_capabilities_cache() -> None:
 
 def detect_capabilities() -> TerminalCapabilities:
     term_program = (os.environ.get("TERM_PROGRAM") or "").lower()
+    terminal_emulator = (os.environ.get("TERMINAL_EMULATOR") or "").lower()
     term = (os.environ.get("TERM") or "").lower()
     color_term = (os.environ.get("COLORTERM") or "").lower()
+    has_true_color = color_term in ("truecolor", "24bit")
+
+    if os.environ.get("TMUX") or term.startswith("tmux"):
+        return TerminalCapabilities(images=None, true_color=has_true_color, hyperlinks=False)
+
+    if term.startswith("screen"):
+        return TerminalCapabilities(images=None, true_color=has_true_color, hyperlinks=False)
 
     if os.environ.get("KITTY_WINDOW_ID") or term_program == "kitty":
         return TerminalCapabilities(images="kitty", true_color=True, hyperlinks=True)
@@ -104,8 +182,18 @@ def detect_capabilities() -> TerminalCapabilities:
     if os.environ.get("WEZTERM_PANE") or term_program == "wezterm":
         return TerminalCapabilities(images="kitty", true_color=True, hyperlinks=True)
 
+    if (
+        term_program == "warpterminal"
+        or os.environ.get("WARP_SESSION_ID")
+        or os.environ.get("WARP_TERMINAL_SESSION_UUID")
+    ):
+        return TerminalCapabilities(images="kitty", true_color=True, hyperlinks=True)
+
     if os.environ.get("ITERM_SESSION_ID") or term_program == "iterm.app":
         return TerminalCapabilities(images="iterm2", true_color=True, hyperlinks=True)
+
+    if os.environ.get("WT_SESSION"):
+        return TerminalCapabilities(images=None, true_color=True, hyperlinks=True)
 
     if term_program == "vscode":
         return TerminalCapabilities(images=None, true_color=True, hyperlinks=True)
@@ -113,8 +201,21 @@ def detect_capabilities() -> TerminalCapabilities:
     if term_program == "alacritty":
         return TerminalCapabilities(images=None, true_color=True, hyperlinks=True)
 
-    true_color = color_term in ("truecolor", "24bit")
-    return TerminalCapabilities(images=None, true_color=true_color, hyperlinks=True)
+    if terminal_emulator == "jetbrains-jediterm":
+        return TerminalCapabilities(images=None, true_color=True, hyperlinks=False)
+
+    return TerminalCapabilities(images=None, true_color=has_true_color, hyperlinks=False)
+
+
+def set_capabilities(caps: TerminalCapabilities) -> None:
+    """Override cached capabilities. Useful in tests."""
+    global _cached_capabilities
+    _cached_capabilities = caps
+
+
+def hyperlink(text: str, url: str) -> str:
+    """Wrap text in an OSC 8 hyperlink sequence."""
+    return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"
 
 
 def get_capabilities() -> TerminalCapabilities:
@@ -157,6 +258,7 @@ def encode_kitty(
     columns: int | None = None,
     rows: int | None = None,
     image_id: int | None = None,
+    move_cursor: bool = True,
 ) -> str:
     """
     Encode image data as a Kitty Graphics Protocol sequence.
@@ -165,6 +267,8 @@ def encode_kitty(
     CHUNK_SIZE = 4096
 
     params = ["a=T", "f=100", "q=2"]
+    if move_cursor is False:
+        params.append("C=1")
     if columns:
         params.append(f"c={columns}")
     if rows:
@@ -199,12 +303,132 @@ def encode_kitty(
 
 def delete_kitty_image(image_id: int) -> str:
     """Delete a Kitty graphics image by ID."""
-    return f"\x1b_Ga=d,d=I,i={image_id}\x1b\\"
+    return f"\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\"
 
 
 def delete_all_kitty_images() -> str:
     """Delete all visible Kitty graphics images."""
-    return "\x1b_Ga=d,d=A\x1b\\"
+    return "\x1b_Ga=d,d=A,q=2\x1b\\"
+
+
+def delete_all_kitty_placements() -> str:
+    """Delete visible Kitty placements while retaining uploaded image data."""
+    return "\x1b_Ga=d,d=a,q=2\x1b\\"
+
+
+_kitty_image_metadata: dict[int, _RegisteredKittyImageMetadata] = {}
+_kitty_transmission_generation = 0
+_KITTY_PLACEMENT_CONTROL_KEYS = {"i", "p", "x", "y", "w", "h", "X", "Y", "c", "r", "C", "U", "z", "P", "Q", "H", "V"}
+
+
+def register_kitty_image_metadata(metadata: KittyImageMetadata) -> None:
+    global _kitty_transmission_generation
+    _kitty_transmission_generation += 1
+    _kitty_image_metadata.pop(metadata.image_id, None)
+    _kitty_image_metadata[metadata.image_id] = _RegisteredKittyImageMetadata(
+        image_id=metadata.image_id,
+        columns=metadata.columns,
+        rows=metadata.rows,
+        width_px=metadata.width_px,
+        height_px=metadata.height_px,
+        transmission_generation=_kitty_transmission_generation,
+    )
+    if len(_kitty_image_metadata) > 1000:
+        oldest = next(iter(_kitty_image_metadata), None)
+        if oldest is not None:
+            _kitty_image_metadata.pop(oldest, None)
+
+
+def _get_registered_kitty_image_metadata(line: str) -> _RegisteredKittyImageMetadata | None:
+    import re
+
+    match = re.search(r"\x1b_G([^;]*);", line)
+    if not match:
+        return None
+    id_match = re.search(r"(?:^|,)i=(\d+)(?:,|$)", match.group(1))
+    if not id_match:
+        return None
+    return _kitty_image_metadata.get(int(id_match.group(1)))
+
+
+def get_kitty_image_metadata(line: str) -> KittyImageMetadata | None:
+    metadata = _get_registered_kitty_image_metadata(line)
+    if metadata is None:
+        return None
+    return KittyImageMetadata(
+        image_id=metadata.image_id,
+        columns=metadata.columns,
+        rows=metadata.rows,
+        width_px=metadata.width_px,
+        height_px=metadata.height_px,
+    )
+
+
+def get_kitty_image_placement(line: str) -> KittyImagePlacement | None:
+    """Build a placement-only command for an image line emitted by render_image()."""
+    import re
+
+    match = re.search(r"\x1b_G([^;]*);", line)
+    metadata = _get_registered_kitty_image_metadata(line)
+    if match is None or metadata is None:
+        return None
+
+    command_start = match.start()
+    command_controls = match.group(1)
+    transmission_end = 0
+    while True:
+        terminator = line.find("\x1b\\", command_start + len(_KITTY_PREFIX))
+        if terminator == -1:
+            return None
+        transmission_end = terminator + 2
+        if not re.search(r"(?:^|,)m=1(?:,|$)", command_controls):
+            break
+        command_start = transmission_end
+        if not line.startswith(_KITTY_PREFIX, command_start):
+            return None
+        controls_end = line.find(";", command_start + len(_KITTY_PREFIX))
+        if controls_end == -1:
+            return None
+        command_controls = line[command_start + len(_KITTY_PREFIX) : controls_end]
+
+    controls = [
+        control
+        for control in match.group(1).split(",")
+        if control.split("=", 1)[0] in _KITTY_PLACEMENT_CONTROL_KEYS
+    ]
+    sequence = f"\x1b_Ga=p,q=2,{','.join(controls)}\x1b\\"
+    return KittyImagePlacement(
+        image_id=metadata.image_id,
+        transmission_generation=metadata.transmission_generation,
+        transmission_bytes=transmission_end - match.start(),
+        estimated_decoded_bytes=metadata.width_px * metadata.height_px * 4,
+        sequence=sequence,
+        replacement_line=f"{line[: match.start()]}{sequence}{line[transmission_end:]}",
+    )
+
+
+def crop_kitty_image_line(line: str, hidden_rows: int, visible_rows: int) -> str:
+    import re
+
+    metadata = get_kitty_image_metadata(line)
+    match = re.search(r"\x1b_G([^;]*);", line)
+    if (
+        metadata is None
+        or match is None
+        or hidden_rows < 0
+        or hidden_rows >= metadata.rows
+        or visible_rows <= 0
+    ):
+        return line
+    cropped_rows = min(visible_rows, metadata.rows - hidden_rows)
+    if hidden_rows == 0 and cropped_rows == metadata.rows:
+        return line
+    source_y = (metadata.height_px * hidden_rows) // metadata.rows
+    source_end = -(-metadata.height_px * (hidden_rows + cropped_rows) // metadata.rows)
+    source_height = max(1, min(metadata.height_px, source_end) - source_y)
+    controls = [control for control in match.group(1).split(",") if not re.match(r"^[yhr]=", control)]
+    controls.extend([f"y={source_y}", f"h={source_height}", f"r={cropped_rows}"])
+    return f"{line[: match.start()]}\x1b_G{','.join(controls)};{line[match.start() + len(match.group(0)):]}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -386,7 +610,23 @@ def render_image(
     rows = calculate_image_rows(image_dims, max_width, get_cell_dimensions())
 
     if caps.images == "kitty":
-        seq = encode_kitty(base64_data, columns=max_width, rows=rows, image_id=opts.image_id)
+        if opts.image_id is not None:
+            register_kitty_image_metadata(
+                KittyImageMetadata(
+                    image_id=opts.image_id,
+                    columns=max_width,
+                    rows=rows,
+                    width_px=image_dims.width_px,
+                    height_px=image_dims.height_px,
+                )
+            )
+        seq = encode_kitty(
+            base64_data,
+            columns=max_width,
+            rows=rows,
+            image_id=opts.image_id,
+            move_cursor=opts.move_cursor,
+        )
         return _RenderResult(seq, rows, opts.image_id)
 
     if caps.images == "iterm2":
@@ -401,6 +641,13 @@ def render_image(
     return None
 
 
+def _shorten_image_path(filename: str) -> str:
+    home = os.path.expanduser("~")
+    if home and (filename == home or filename.startswith(f"{home}/") or filename.startswith(f"{home}\\")):
+        return f"~{filename[len(home):]}"
+    return filename
+
+
 def image_fallback(
     mime_type: str,
     dimensions: ImageDimensions | None = None,
@@ -408,7 +655,11 @@ def image_fallback(
 ) -> str:
     parts: list[str] = []
     if filename:
-        parts.append(filename)
+        display = _shorten_image_path(filename)
+        if get_capabilities().hyperlinks and os.path.isabs(filename):
+            parts.append(hyperlink(display, f"file://{filename}"))
+        else:
+            parts.append(display)
     parts.append(f"[{mime_type}]")
     if dimensions:
         parts.append(f"{dimensions.width_px}x{dimensions.height_px}")

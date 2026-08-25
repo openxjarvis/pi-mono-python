@@ -51,6 +51,32 @@ def _error(cmd_id: str | None, command: str, message: str) -> RpcResponseError:
     return RpcResponseError(id=cmd_id, command=command, error=message)
 
 
+def _entry_to_dict(entry: Any) -> dict[str, Any]:
+    if hasattr(entry, "data") and isinstance(entry.data, dict):
+        payload = dict(entry.data)
+        payload.setdefault("id", entry.id)
+        payload.setdefault("type", entry.type)
+        payload.setdefault("timestamp", entry.timestamp)
+        payload.setdefault("parentId", entry.parent_id)
+        return payload
+    if hasattr(entry, "model_dump"):
+        return entry.model_dump()
+    return {
+        "id": getattr(entry, "id", None),
+        "type": getattr(entry, "type", None),
+        "timestamp": getattr(entry, "timestamp", None),
+        "parentId": getattr(entry, "parent_id", None),
+    }
+
+
+def _tree_to_dict(node: Any) -> dict[str, Any]:
+    return {
+        "entry": _entry_to_dict(getattr(node, "entry", node)),
+        "label": getattr(node, "label", None),
+        "children": [_tree_to_dict(child) for child in getattr(node, "children", [])],
+    }
+
+
 def _create_extension_ui_context(
     pending_requests: dict[str, asyncio.Future[Any]],
     output_fn: Any,
@@ -273,7 +299,11 @@ async def run_rpc_mode(session: "AgentSession") -> None:
 
         elif cmd_type == "new_session":
             opts = {"parentSession": command["parentSession"]} if command.get("parentSession") else None
-            cancelled = not await session.new_session(opts)
+            result = await session.new_session(opts)
+            if isinstance(result, dict):
+                cancelled = bool(result.get("cancelled", False))
+            else:
+                cancelled = not result
             return _success(cmd_id, "new_session", {"cancelled": cancelled})
 
         elif cmd_type == "get_state":
@@ -319,6 +349,10 @@ async def run_rpc_mode(session: "AgentSession") -> None:
         elif cmd_type == "cycle_thinking_level":
             level = session.cycle_thinking_level()
             return _success(cmd_id, "cycle_thinking_level", {"level": level} if level else None)
+
+        elif cmd_type == "get_available_thinking_levels":
+            levels = session.get_available_thinking_levels()
+            return _success(cmd_id, "get_available_thinking_levels", {"levels": levels})
 
         elif cmd_type == "set_steering_mode":
             session.set_steering_mode(command["mode"])
@@ -366,7 +400,38 @@ async def run_rpc_mode(session: "AgentSession") -> None:
 
         elif cmd_type == "fork":
             result = await session.fork(command["entryId"])
-            return _success(cmd_id, "fork", {"text": result.get("selectedText", ""), "cancelled": result.get("cancelled", False)})
+            if isinstance(result, dict):
+                return _success(cmd_id, "fork", {"text": result.get("selectedText", ""), "cancelled": result.get("cancelled", False)})
+            return _success(cmd_id, "fork", {"text": "", "cancelled": False})
+
+        elif cmd_type == "clone":
+            try:
+                result = await session.clone()
+            except RuntimeError as exc:
+                return _error(cmd_id, "clone", str(exc))
+            cancelled = result.get("cancelled", False) if isinstance(result, dict) else False
+            return _success(cmd_id, "clone", {"cancelled": cancelled})
+
+        elif cmd_type == "get_entries":
+            session_manager = session.session_manager
+            entries = session_manager.get_entries()
+            since = command.get("since")
+            if since is not None:
+                since_index = next((i for i, entry in enumerate(entries) if entry.id == since), -1)
+                if since_index == -1:
+                    return _error(cmd_id, "get_entries", f"Entry not found: {since}")
+                entries = entries[since_index + 1 :]
+            return _success(cmd_id, "get_entries", {
+                "entries": [_entry_to_dict(entry) for entry in entries],
+                "leafId": session_manager.get_leaf_id(),
+            })
+
+        elif cmd_type == "get_tree":
+            session_manager = session.session_manager
+            return _success(cmd_id, "get_tree", {
+                "tree": [_tree_to_dict(node) for node in session_manager.get_tree()],
+                "leafId": session_manager.get_leaf_id(),
+            })
 
         elif cmd_type == "get_fork_messages":
             messages = session.get_user_messages_for_forking()

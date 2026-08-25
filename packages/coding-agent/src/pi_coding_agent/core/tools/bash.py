@@ -53,10 +53,19 @@ def _kill_process_tree(pid: int) -> None:
                 pass
 
 
-def create_bash_tool(cwd: str, command_prefix: str | None = None) -> AgentTool:
+def create_bash_tool(
+    cwd: str,
+    command_prefix: str | None = None,
+    *,
+    shell_config: tuple[str, list[str]] | None = None,
+    name: str = "bash",
+    label: str = "bash",
+    description: str | None = None,
+    command_param_description: str = "Bash command to execute",
+) -> AgentTool:
     """
-    Create a bash execution tool.
-    Mirrors createBashTool() in TypeScript.
+    Create a bash/shell execution tool.
+    Mirrors createBashTool() / createShellToolDefinition() in TypeScript.
     """
 
     async def execute(
@@ -76,7 +85,7 @@ def create_bash_tool(cwd: str, command_prefix: str | None = None) -> AgentTool:
 
         resolved_command = f"{command_prefix}\n{command}" if command_prefix else command
 
-        shell, args = _get_shell()
+        shell, args = shell_config if shell_config is not None else _get_shell()
 
         # Track output
         chunks: list[bytes] = []
@@ -215,9 +224,9 @@ def create_bash_tool(cwd: str, command_prefix: str | None = None) -> AgentTool:
         )
 
     return AgentTool(
-        name="bash",
-        label="bash",
-        description=(
+        name=name,
+        label=label,
+        description=description or (
             f"Execute a bash command in the current working directory. "
             f"Returns stdout and stderr. Output is truncated to last "
             f"{DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB. "
@@ -226,7 +235,7 @@ def create_bash_tool(cwd: str, command_prefix: str | None = None) -> AgentTool:
         parameters={
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Bash command to execute"},
+                "command": {"type": "string", "description": command_param_description},
                 "timeout": {"type": "number", "description": "Timeout in seconds (optional)"},
             },
             "required": ["command"],

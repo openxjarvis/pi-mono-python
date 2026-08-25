@@ -47,6 +47,7 @@ from ..types import (
     UsageCost,
     UserMessage,
 )
+from ..utils.deferred_tools import split_deferred_tools
 from ..utils.event_stream import EventStream
 from ..utils.json_parse import parse_partial_json, parse_streaming_json
 from ..utils.sanitize_unicode import sanitize_surrogates
@@ -117,6 +118,7 @@ _EFFORT_MAP = {
     "medium": "medium",
     "high": "high",
     "xhigh": "max",
+    "max": "max",
 }
 
 # Stop reason mapping from Anthropic to pi_ai (matches TS exactly)
@@ -141,18 +143,40 @@ def _normalize_tool_call_id(id_: str, model: Model, source: AssistantMessage) ->
 
 
 def _supports_adaptive_thinking(model_id: str) -> bool:
-    """Check if model supports adaptive thinking (Opus 4.6+ or Sonnet 4.6+)."""
+    """Check if model supports adaptive thinking (Opus 4.6+ / Sonnet 4.6+ / Fable 5)."""
+    mid = model_id.lower()
     return (
-        "opus-4-6" in model_id or "opus-4.6" in model_id
-        or "sonnet-4-6" in model_id or "sonnet-4.6" in model_id
+        "opus-4-6" in mid or "opus-4.6" in mid
+        or "opus-4-7" in mid or "opus-4.7" in mid
+        or "opus-4-8" in mid or "opus-4.8" in mid
+        or "sonnet-4-6" in mid or "sonnet-4.6" in mid
+        or "sonnet-4-7" in mid or "sonnet-4.7" in mid
+        or "sonnet-5" in mid
+        or "fable-5" in mid
     )
 
 
-def _map_thinking_level_to_effort(level: str, model_id: str) -> str:
-    """Map thinking level to Anthropic effort string, model-aware."""
-    if level == "xhigh":
-        # Only Opus 4.6 supports "max"; Sonnet 4.6 tops out at "high"
-        return "max" if ("opus-4-6" in model_id or "opus-4.6" in model_id) else "high"
+def _map_thinking_level_to_effort(level: str, model_id: str, model: Model | None = None) -> str:
+    """Map thinking level to Anthropic effort string, model-aware.
+
+    Effort "max" is available on all adaptive-thinking Claude models, while native
+    "xhigh" is only available on Opus 4.7/4.8, Sonnet 5, and Fable 5.
+    """
+    if model and model.thinking_level_map and level in model.thinking_level_map:
+        mapped = model.thinking_level_map[level]
+        if isinstance(mapped, str):
+            return mapped
+    if level in ("xhigh", "max"):
+        mid = model_id.lower()
+        native_xhigh = (
+            "opus-4-7" in mid or "opus-4.7" in mid
+            or "opus-4-8" in mid or "opus-4.8" in mid
+            or "sonnet-5" in mid
+            or "fable-5" in mid
+        )
+        if level == "xhigh" and native_xhigh:
+            return "xhigh"
+        return "max"
     return {"minimal": "low", "low": "low", "medium": "medium", "high": "high"}.get(level, "high")
 
 
@@ -437,10 +461,15 @@ async def stream_simple(
 
     # Transform messages for cross-provider compatibility
     transformed_msgs = _transform_messages(context.messages, model, _normalize_tool_call_id)
+    deferred_enabled = any(getattr(m, "added_tool_names", None) for m in transformed_msgs)
+    immediate_tools, _deferred = split_deferred_tools(
+        Context(system_prompt=context.system_prompt, messages=transformed_msgs, tools=context.tools),
+        deferred_enabled,
+    )
     transformed_context = Context(
         system_prompt=context.system_prompt,
         messages=transformed_msgs,
-        tools=context.tools,
+        tools=immediate_tools,
     )
 
     messages = _build_messages(transformed_context, is_oauth=is_oauth, cache_control=cache_control)
@@ -470,7 +499,7 @@ async def stream_simple(
     if opts.reasoning:
         if _supports_adaptive_thinking(model.id) or is_oauth:
             # Adaptive thinking: effort levels (model-aware)
-            effort = _map_thinking_level_to_effort(opts.reasoning, model.id)
+            effort = _map_thinking_level_to_effort(opts.reasoning, model.id, model)
             params["thinking"] = {"type": "adaptive"}
             params["output_config"] = {"effort": effort}
         else:

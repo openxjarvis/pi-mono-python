@@ -96,6 +96,14 @@ def _extract_complete_sequences(buffer: str) -> tuple[list[str], str]:
                 candidate = remaining[:seq_end]
                 status = _is_complete_sequence(candidate)
                 if status == "complete":
+                    # WezTerm can emit Escape as a raw ESC followed immediately
+                    # by a Kitty CSI-u release: ESC ESC [ 27 ; ... u
+                    if candidate == "\x1b\x1b" and seq_end < len(remaining):
+                        nxt = remaining[seq_end]
+                        if nxt in ("[", "]", "O", "P", "_"):
+                            sequences.append(ESC)
+                            pos += 1
+                            break
                     sequences.append(candidate)
                     pos += seq_end
                     break
@@ -129,15 +137,18 @@ class StdinBuffer:
 
     def __init__(
         self,
-        timeout_ms: int = 10,
+        timeout_ms: int = 50,
+        escape_timeout_ms: int = 10,
         on_data: Callable[[str], None] | None = None,
         on_paste: Callable[[str], None] | None = None,
     ) -> None:
         self._timeout_ms = timeout_ms
+        self._escape_timeout_ms = escape_timeout_ms
         self._buffer = ""
         self._paste_mode = False
         self._paste_buffer = ""
         self._timer: threading.Timer | None = None
+        self._pending_kitty_printable: int | None = None
         self._on_data: list[Callable[[str], None]] = []
         self._on_paste: list[Callable[[str], None]] = []
         if on_data:
@@ -153,6 +164,15 @@ class StdinBuffer:
             self._on_paste.append(callback)
 
     def _emit_data(self, seq: str) -> None:
+        raw_cp = ord(seq[0]) if len(seq) == 1 else None
+        if raw_cp is not None and raw_cp == self._pending_kitty_printable:
+            self._pending_kitty_printable = None
+            return
+        import re
+        kitty = re.match(r"^\x1b\[(\d+)(?::\d*)?(?::\d+)?u$", seq)
+        self._pending_kitty_printable = (
+            int(kitty.group(1)) if kitty and int(kitty.group(1)) >= 32 else None
+        )
         for cb in self._on_data:
             cb(seq)
 
@@ -234,13 +254,15 @@ class StdinBuffer:
                 for seq in flushed:
                     self._emit_data(seq)
 
-            self._timer = threading.Timer(self._timeout_ms / 1000.0, _flush_timer)
+            timeout_ms = self._escape_timeout_ms if self._buffer == ESC else self._timeout_ms
+            self._timer = threading.Timer(timeout_ms / 1000.0, _flush_timer)
             self._timer.daemon = True
             self._timer.start()
 
     def flush(self) -> list[str]:
         """Flush the buffer, returning any pending sequences."""
         self._cancel_timer()
+        self._pending_kitty_printable = None
         if not self._buffer:
             return []
         seqs = [self._buffer]
@@ -253,6 +275,7 @@ class StdinBuffer:
         self._buffer = ""
         self._paste_mode = False
         self._paste_buffer = ""
+        self._pending_kitty_printable = None
 
     def get_buffer(self) -> str:
         return self._buffer

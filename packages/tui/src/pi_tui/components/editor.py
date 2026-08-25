@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from ..autocomplete import AutocompleteProvider
-from ..keybindings import get_editor_keybindings
+from ..keybindings import get_keybindings
 from ..keys import matches_key
 from ..kill_ring import KillRing
 from ..tui import CURSOR_MARKER
 from ..undo_stack import UndoStack
-from ..utils import _segment_graphemes, is_punctuation_char, is_whitespace_char, visible_width
+from ..utils import _segment_graphemes, is_whitespace_char, visible_width
+from ..word_navigation import find_word_backward, find_word_forward
 from .select_list import SelectItem, SelectList, SelectListTheme
 
 if TYPE_CHECKING:
@@ -26,6 +27,16 @@ _KITTY_MOD_CTRL = 4
 
 
 _KITTY_PRINTABLE_ALLOWED_MODIFIERS = _KITTY_MOD_SHIFT | 64 | 128  # Shift + lock bits
+_DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS = ["@", "#"]
+
+
+def _escape_character_class(value: str) -> str:
+    return re.sub(r"[\\^$.*+?()[\]{}|-]", lambda match: "\\" + match.group(0), value)
+
+
+def _build_trigger_pattern(trigger_characters: list[str]) -> re.Pattern[str]:
+    escaped = "".join(_escape_character_class(ch) for ch in trigger_characters)
+    return re.compile(rf"(?:^|[\s])[{escaped}][^\s]*$")
 
 
 def _decode_kitty_printable(data: str) -> str | None:
@@ -177,6 +188,8 @@ class Editor:
         self._autocomplete_list: SelectList | None = None
         self._autocomplete_state: str | None = None  # "regular" | "force" | None
         self._autocomplete_prefix = ""
+        self._autocomplete_trigger_characters = list(_DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS)
+        self._autocomplete_trigger_pattern = _build_trigger_pattern(self._autocomplete_trigger_characters)
 
         self._pastes: dict[int, str] = {}
         self._paste_counter = 0
@@ -229,6 +242,21 @@ class Editor:
 
     def set_autocomplete_provider(self, provider: AutocompleteProvider) -> None:
         self._autocomplete_provider = provider
+        self._set_autocomplete_trigger_characters(getattr(provider, "trigger_characters", None) or [])
+
+    def _set_autocomplete_trigger_characters(self, trigger_characters: list[str]) -> None:
+        next_chars = list(_DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS)
+        for character in trigger_characters:
+            if (
+                len(character) != 1
+                or character == "/"
+                or is_whitespace_char(character)
+                or character in next_chars
+            ):
+                continue
+            next_chars.append(character)
+        self._autocomplete_trigger_characters = next_chars
+        self._autocomplete_trigger_pattern = _build_trigger_pattern(next_chars)
 
     def add_to_history(self, text: str) -> None:
         trimmed = text.strip()
@@ -366,10 +394,10 @@ class Editor:
     # ── Input handling ──────────────────────────────────────────────────────────
 
     def handle_input(self, data: str) -> None:
-        kb = get_editor_keybindings()
+        kb = get_keybindings()
 
         if self._jump_mode is not None:
-            if kb.matches(data, "jumpForward") or kb.matches(data, "jumpBackward"):
+            if kb.matches(data, "tui.editor.jumpForward") or kb.matches(data, "tui.editor.jumpBackward"):
                 self._jump_mode = None
                 return
             if data and ord(data[0]) >= 32:
@@ -398,28 +426,28 @@ class Editor:
                     self.handle_input(remaining)
             return
 
-        if kb.matches(data, "copy"):
+        if kb.matches(data, "tui.input.copy"):
             return
 
-        if kb.matches(data, "undo"):
+        if kb.matches(data, "tui.editor.undo"):
             self._undo()
             return
 
         # Autocomplete navigation
         if self._autocomplete_state and self._autocomplete_list:
-            if kb.matches(data, "selectCancel"):
+            if kb.matches(data, "tui.select.cancel"):
                 self._cancel_autocomplete()
                 return
-            if kb.matches(data, "selectUp") or kb.matches(data, "selectDown"):
+            if kb.matches(data, "tui.select.up") or kb.matches(data, "tui.select.down"):
                 self._autocomplete_list.handle_input(data)
                 return
-            if kb.matches(data, "tab"):
+            if kb.matches(data, "tui.input.tab"):
                 selected = self._autocomplete_list.get_selected_item()
                 if selected and self._autocomplete_provider:
                     self._apply_autocomplete(selected)
                     self._cancel_autocomplete()
                 return
-            if kb.matches(data, "selectConfirm"):
+            if kb.matches(data, "tui.select.confirm"):
                 selected = self._autocomplete_list.get_selected_item()
                 if selected and self._autocomplete_provider:
                     prefix = self._autocomplete_prefix
@@ -433,52 +461,61 @@ class Editor:
                             self.on_change(self.get_text())
                         return
 
-        if kb.matches(data, "tab") and not self._autocomplete_state:
+        if kb.matches(data, "tui.input.tab") and not self._autocomplete_state:
             self._handle_tab_completion()
             return
 
-        if kb.matches(data, "deleteToLineEnd"):
+        if kb.matches(data, "tui.editor.deleteToLineEnd"):
             self._delete_to_end_of_line()
             return
-        if kb.matches(data, "deleteToLineStart"):
+        if kb.matches(data, "tui.editor.deleteToLineStart"):
             self._delete_to_start_of_line()
             return
-        if kb.matches(data, "deleteWordBackward"):
+        if kb.matches(data, "tui.editor.deleteWordBackward"):
             self._delete_word_backwards()
             return
-        if kb.matches(data, "deleteWordForward"):
+        if kb.matches(data, "tui.editor.deleteWordForward"):
             self._delete_word_forward()
             return
-        if kb.matches(data, "deleteCharBackward") or matches_key(data, "shift+backspace"):
+        if kb.matches(data, "tui.editor.deleteCharBackward") or matches_key(data, "shift+backspace"):
             self._handle_backspace()
             return
-        if kb.matches(data, "deleteCharForward") or matches_key(data, "shift+delete"):
+        if kb.matches(data, "tui.editor.deleteCharForward") or matches_key(data, "shift+delete"):
             self._handle_forward_delete()
             return
 
-        if kb.matches(data, "yank"):
+        if kb.matches(data, "tui.editor.yank"):
             self._yank()
             return
-        if kb.matches(data, "yankPop"):
+        if kb.matches(data, "tui.editor.yankPop"):
             self._yank_pop()
             return
 
-        if kb.matches(data, "cursorLineStart"):
+        if kb.matches(data, "tui.editor.historyPrevious"):
+            self._cancel_autocomplete()
+            self._navigate_history(-1)
+            return
+        if kb.matches(data, "tui.editor.historyNext"):
+            self._cancel_autocomplete()
+            self._navigate_history(1)
+            return
+
+        if kb.matches(data, "tui.editor.cursorLineStart"):
             self._move_to_line_start()
             return
-        if kb.matches(data, "cursorLineEnd"):
+        if kb.matches(data, "tui.editor.cursorLineEnd"):
             self._move_to_line_end()
             return
-        if kb.matches(data, "cursorWordLeft"):
+        if kb.matches(data, "tui.editor.cursorWordLeft"):
             self._move_word_backwards()
             return
-        if kb.matches(data, "cursorWordRight"):
+        if kb.matches(data, "tui.editor.cursorWordRight"):
             self._move_word_forwards()
             return
 
         # New line
         is_new_line = (
-            kb.matches(data, "newLine") or
+            kb.matches(data, "tui.input.newLine") or
             (len(data) > 1 and ord(data[0]) == 10) or
             (len(data) > 1 and "\x1b" in data and "\r" in data) or
             data == "\x1b\r" or
@@ -493,7 +530,7 @@ class Editor:
             self._add_new_line()
             return
 
-        if kb.matches(data, "submit"):
+        if kb.matches(data, "tui.input.submit"):
             if self.disable_submit:
                 return
             current_line = self._state.lines[self._state.cursor_line] if self._state.lines else ""
@@ -504,7 +541,7 @@ class Editor:
             self._submit_value()
             return
 
-        if kb.matches(data, "cursorUp"):
+        if kb.matches(data, "tui.editor.cursorUp"):
             if self._is_editor_empty():
                 self._navigate_history(-1)
             elif self._history_index > -1 and self._is_on_first_visual_line():
@@ -514,7 +551,7 @@ class Editor:
             else:
                 self._move_cursor(-1, 0)
             return
-        if kb.matches(data, "cursorDown"):
+        if kb.matches(data, "tui.editor.cursorDown"):
             if self._history_index > -1 and self._is_on_last_visual_line():
                 self._navigate_history(1)
             elif self._is_on_last_visual_line():
@@ -522,24 +559,24 @@ class Editor:
             else:
                 self._move_cursor(1, 0)
             return
-        if kb.matches(data, "cursorRight"):
+        if kb.matches(data, "tui.editor.cursorRight"):
             self._move_cursor(0, 1)
             return
-        if kb.matches(data, "cursorLeft"):
+        if kb.matches(data, "tui.editor.cursorLeft"):
             self._move_cursor(0, -1)
             return
 
-        if kb.matches(data, "pageUp"):
+        if kb.matches(data, "tui.editor.pageUp"):
             self._page_scroll(-1)
             return
-        if kb.matches(data, "pageDown"):
+        if kb.matches(data, "tui.editor.pageDown"):
             self._page_scroll(1)
             return
 
-        if kb.matches(data, "jumpForward"):
+        if kb.matches(data, "tui.editor.jumpForward"):
             self._jump_mode = "forward"
             return
-        if kb.matches(data, "jumpBackward"):
+        if kb.matches(data, "tui.editor.jumpBackward"):
             self._jump_mode = "backward"
             return
 
@@ -584,7 +621,7 @@ class Editor:
             self._set_text_internal(self._history[self._history_index])
 
     def _set_text_internal(self, text: str) -> None:
-        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
         lines = normalized.split("\n")
         self._state.lines = lines if lines else [""]
         self._state.cursor_line = len(self._state.lines) - 1
@@ -769,18 +806,12 @@ class Editor:
         if not self._autocomplete_state:
             if char == "/" and self._is_at_start_of_message():
                 self._try_trigger_autocomplete()
-            elif char == "@":
+            else:
                 current_line = self._state.lines[self._state.cursor_line] if self._state.lines else ""
                 text_before = current_line[:self._state.cursor_col]
-                char_before_at = text_before[-2] if len(text_before) >= 2 else None
-                if len(text_before) == 1 or char_before_at in (None, " ", "\t"):
+                if self._is_in_slash_command_context(text_before) and re.match(r"[a-zA-Z0-9.\-_]", char):
                     self._try_trigger_autocomplete()
-            elif re.match(r"[a-zA-Z0-9.\-_]", char):
-                current_line = self._state.lines[self._state.cursor_line] if self._state.lines else ""
-                text_before = current_line[:self._state.cursor_col]
-                if self._is_in_slash_command_context(text_before):
-                    self._try_trigger_autocomplete()
-                elif re.search(r"(?:^|[\s])@[^\s]*$", text_before):
+                elif self._autocomplete_trigger_pattern.search(text_before):
                     self._try_trigger_autocomplete()
         else:
             self._update_autocomplete()
@@ -842,7 +873,7 @@ class Editor:
             return False
         if not matches_key(data, "enter"):
             return False
-        submit_keys = kb.get_keys("submit")  # type: ignore[union-attr]
+        submit_keys = kb.get_keys("tui.input.submit")  # type: ignore[union-attr]
         has_shift_enter = "shift+enter" in submit_keys or "shift+return" in submit_keys
         if not has_shift_enter:
             return False
@@ -1119,23 +1150,7 @@ class Editor:
                 self._set_cursor_col(len(prev_line))
             return
 
-        text_before = current_line[:self._state.cursor_col]
-        graphemes = _segment_graphemes(text_before)
-        new_col = self._state.cursor_col
-
-        while graphemes and is_whitespace_char(graphemes[-1]):
-            new_col -= len(graphemes.pop())
-
-        if graphemes:
-            last = graphemes[-1]
-            if is_punctuation_char(last):
-                while graphemes and is_punctuation_char(graphemes[-1]):
-                    new_col -= len(graphemes.pop())
-            else:
-                while graphemes and not is_whitespace_char(graphemes[-1]) and not is_punctuation_char(graphemes[-1]):
-                    new_col -= len(graphemes.pop())
-
-        self._set_cursor_col(new_col)
+        self._set_cursor_col(find_word_backward(current_line, self._state.cursor_col))
 
     def _move_word_forwards(self) -> None:
         self._last_action = None
@@ -1146,27 +1161,7 @@ class Editor:
                 self._set_cursor_col(0)
             return
 
-        text_after = current_line[self._state.cursor_col:]
-        graphemes = _segment_graphemes(text_after)
-        idx = 0
-        new_col = self._state.cursor_col
-
-        while idx < len(graphemes) and is_whitespace_char(graphemes[idx]):
-            new_col += len(graphemes[idx])
-            idx += 1
-
-        if idx < len(graphemes):
-            first = graphemes[idx]
-            if is_punctuation_char(first):
-                while idx < len(graphemes) and is_punctuation_char(graphemes[idx]):
-                    new_col += len(graphemes[idx])
-                    idx += 1
-            else:
-                while idx < len(graphemes) and not is_whitespace_char(graphemes[idx]) and not is_punctuation_char(graphemes[idx]):
-                    new_col += len(graphemes[idx])
-                    idx += 1
-
-        self._set_cursor_col(new_col)
+        self._set_cursor_col(find_word_forward(current_line, self._state.cursor_col))
 
     def _jump_to_char(self, char: str, direction: str) -> None:
         self._last_action = None
@@ -1196,7 +1191,7 @@ class Editor:
     def _insert_text_at_cursor_internal(self, text: str) -> None:
         if not text:
             return
-        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
         inserted_lines = normalized.split("\n")
         current_line = self._state.lines[self._state.cursor_line] if self._state.lines else ""
         before = current_line[:self._state.cursor_col]

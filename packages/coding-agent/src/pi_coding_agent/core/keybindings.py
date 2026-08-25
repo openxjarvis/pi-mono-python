@@ -127,6 +127,34 @@ DEFAULT_KEYBINDINGS: dict[str, Union[KeyId, list[KeyId]]] = {
 }
 
 
+# TypeScript app keybinding names → Python short action names
+_APP_ACTION_ALIASES: dict[str, str] = {
+    "app.interrupt": "interrupt",
+    "app.clear": "clear",
+    "app.exit": "exit",
+    "app.suspend": "suspend",
+    "app.thinking.cycle": "cycleThinkingLevel",
+    "app.model.cycleForward": "cycleModelForward",
+    "app.model.cycleBackward": "cycleModelBackward",
+    "app.model.select": "selectModel",
+    "app.tools.expand": "expandTools",
+    "app.thinking.toggle": "toggleThinking",
+    "app.session.toggleNamedFilter": "toggleSessionNamedFilter",
+    "app.editor.external": "externalEditor",
+    "app.message.followUp": "followUp",
+    "app.message.dequeue": "dequeue",
+    "app.clipboard.pasteImage": "pasteImage",
+    "app.session.new": "newSession",
+    "app.session.tree": "tree",
+    "app.session.fork": "fork",
+    "app.session.resume": "resume",
+}
+
+
+def _normalize_app_action(action: str) -> str:
+    return _APP_ACTION_ALIASES.get(action, action)
+
+
 class KeybindingsManager:
     """
     Manages all keybindings (app + editor).
@@ -151,8 +179,8 @@ class KeybindingsManager:
 
         if os.path.exists(keybindings_path):
             try:
-                with open(keybindings_path, encoding="utf-8") as f:
-                    user_config = json.load(f)
+                from pi_coding_agent.utils.text import load_json_file
+                user_config = load_json_file(keybindings_path)
             except Exception:
                 pass
 
@@ -171,16 +199,21 @@ class KeybindingsManager:
 
     def get_keys_for_action(self, action: str) -> list[KeyId]:
         """Get the list of key IDs bound to an action."""
-        if action in APP_ACTIONS:
-            return self._app_action_to_keys.get(action, [])
+        resolved = _normalize_app_action(action)
+        if resolved in APP_ACTIONS:
+            return self._app_action_to_keys.get(resolved, [])
         # Editor actions
-        keys = self._config.get(action) or DEFAULT_EDITOR_KEYBINDINGS.get(action, [])
+        keys = self._config.get(resolved) or self._config.get(action) or DEFAULT_EDITOR_KEYBINDINGS.get(resolved, [])
         if isinstance(keys, str):
             return [keys]
         return list(keys)
 
+    def get_keys(self, action: str) -> list[KeyId]:
+        """TS-compatible alias for get_keys_for_action."""
+        return self.get_keys_for_action(action)
+
     def matches(self, action: str, key: KeyId) -> bool:
-        """Check if a key matches an action."""
+        """Check if a key matches an action. Accepts TS ``app.*`` names or Python shorts."""
         return key in self.get_keys_for_action(action)
 
     def get_config(self) -> dict[str, Union[KeyId, list[KeyId]]]:

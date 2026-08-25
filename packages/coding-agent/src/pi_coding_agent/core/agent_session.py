@@ -11,6 +11,7 @@ import asyncio
 import html
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -26,7 +27,7 @@ from pi_ai import get_model, is_context_overflow
 from pi_ai.types import AssistantMessage, ImageContent, Model, TextContent, UserMessage
 
 from .auth_storage import AuthStorage
-from .compaction import compact_context, should_compact
+from .compaction import compact_context, estimate_context_tokens
 from .messages import wrap_convert_to_llm
 from .model_registry import ModelRegistry
 from .session_manager import SessionManager
@@ -35,6 +36,7 @@ from .system_prompt import build_system_prompt
 from .tools import (
     create_bash_tool,
     create_edit_tool,
+    create_powershell_tool,
     create_find_tool,
     create_grep_tool,
     create_ls_tool,
@@ -45,6 +47,7 @@ from .tools import (
 # ── Thinking levels (mirrors TS constants) ────────────────────────────────────
 _THINKING_LEVELS: list[ThinkingLevel] = ["off", "minimal", "low", "medium", "high"]
 _THINKING_LEVELS_WITH_XHIGH: list[ThinkingLevel] = ["off", "minimal", "low", "medium", "high", "xhigh"]
+_THINKING_LEVELS_WITH_MAX: list[ThinkingLevel] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 # ── Retry error pattern (mirrors TS _isRetryableError regex) ─────────────────
 _RETRY_PATTERN = re.compile(
@@ -145,11 +148,15 @@ class AgentSession:
         # ── Scoped models (for cycling) ───────────────────────────────────────
         self._scoped_models: list[dict[str, Model | ThinkingLevel | None]] | None = None
 
+        # ── Queue modes (RPC get_state / set_*_mode) ──────────────────────────
+        self._steering_mode: str = self._settings_manager.get_steering_mode() or "one-at-a-time"
+        self._follow_up_mode: str = self._settings_manager.get_follow_up_mode() or "one-at-a-time"
+
     # ── Tool construction ─────────────────────────────────────────────────────
 
     def _build_tools(self) -> list[AgentTool]:
         """Create all default coding tools."""
-        return [
+        tools = [
             create_read_tool(self.cwd),
             create_write_tool(self.cwd),
             create_edit_tool(self.cwd),
@@ -158,6 +165,12 @@ class AgentSession:
             create_find_tool(self.cwd),
             create_ls_tool(self.cwd),
         ]
+        if sys.platform == "win32":
+            try:
+                tools.append(create_powershell_tool(self.cwd))
+            except RuntimeError:
+                pass
+        return tools
 
     # ── Model resolution ──────────────────────────────────────────────────────
 
@@ -452,6 +465,100 @@ class AgentSession:
 
         return True
 
+    async def new_session(self, options: dict[str, Any] | None = None) -> bool:
+        """
+        Start a new session, replacing the current one.
+
+        Mirrors AgentSessionRuntime.newSession() / RPC ``new_session``.
+        Returns True if the session was created (not cancelled).
+        """
+        await self.abort()
+        self._agent.clear_all_queues()
+        self._pending_bash_messages = []
+        self._pending_next_turn_messages = []
+        self._retry_attempt = 0
+        self._overflow_recovery_attempted = False
+
+        parent: str | None = None
+        if options:
+            parent = options.get("parentSession") or options.get("parent_session")
+
+        session_dir = self._session_manager.get_session_dir()
+        new_sm = SessionManager.create(
+            self.cwd,
+            session_dir=session_dir,
+            parent_session=parent,
+        )
+        self._session_manager = new_sm
+        self.session_id = new_sm.get_session_id()
+        self._agent.replace_messages([])
+        return True
+
+    async def clone(self) -> dict[str, Any]:
+        """
+        Duplicate the current session at the current leaf.
+        Mirrors RPC ``clone`` (fork at current entry).
+        """
+        leaf_id = self._session_manager.get_leaf_id()
+        if not leaf_id:
+            raise RuntimeError("Cannot clone session: no current entry selected")
+
+        await self.abort()
+        self._agent.clear_all_queues()
+        self._pending_bash_messages = []
+        self._pending_next_turn_messages = []
+
+        new_sm = self._session_manager.branch(leaf_id, self.cwd)
+        self._session_manager = new_sm
+        self.session_id = new_sm.get_session_id()
+        context = new_sm.build_context()
+        self._agent.replace_messages(context.messages)
+        return {"cancelled": False}
+
+    async def import_from_jsonl(
+        self,
+        input_path: str,
+        cwd_override: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Import a session JSONL file and switch to it.
+        Mirrors AgentSessionRuntime.importFromJsonl().
+        """
+        import shutil
+
+        from .session_cwd import MissingSessionCwdError, assert_session_cwd_exists
+
+        resolved = os.path.abspath(os.path.expanduser(input_path))
+        if not os.path.exists(resolved):
+            raise FileNotFoundError(f"File not found: {resolved}")
+
+        session_dir = self._session_manager.get_session_dir()
+        os.makedirs(session_dir, exist_ok=True)
+        destination = os.path.join(session_dir, os.path.basename(resolved))
+        if os.path.abspath(destination) != resolved:
+            shutil.copy2(resolved, destination)
+
+        new_sm = SessionManager.open(destination)
+        if cwd_override:
+            if new_sm._header is not None:
+                new_sm._header["cwd"] = cwd_override
+            new_sm._cwd = cwd_override
+        try:
+            assert_session_cwd_exists(new_sm, cwd_override or self.cwd)
+        except MissingSessionCwdError:
+            raise
+
+        await self.abort()
+        self._session_manager = new_sm
+        self.session_id = new_sm.get_session_id()
+        if cwd_override:
+            self.cwd = cwd_override
+        elif new_sm.get_cwd():
+            self.cwd = new_sm.get_cwd()
+        context = new_sm.build_context()
+        self._agent.replace_messages(context.messages)
+        return {"cancelled": False}
+
     async def navigate_tree(
         self,
         target_id: str,
@@ -592,25 +699,103 @@ class AgentSession:
         return self._session_manager
 
     @property
+    def settings_manager(self) -> SettingsManager:
+        return self._settings_manager
+
+    @property
+    def scoped_models(self) -> list[Any]:
+        return list(self._scoped_models or [])
+
+    @property
+    def resource_loader(self) -> Any:
+        return getattr(self, "_resource_loader", None)
+
+    @property
+    def extension_runner(self) -> Any:
+        return getattr(self, "_extension_runner", None)
+
+    @property
+    def model_runtime(self) -> Any:
+        return getattr(self, "_model_runtime", None)
+
+    @property
+    def prompt_templates(self) -> list[Any]:
+        return list(getattr(self, "_prompt_templates", []) or [])
+
+    @property
     def system_prompt(self) -> str:
         return self._agent.state.system_prompt
+
+    @property
+    def agent(self):
+        """Underlying Agent instance (used by RPC extension bindings)."""
+        return self._agent
+
+    @property
+    def messages(self) -> list[Any]:
+        """All messages including custom types. Mirrors TS AgentSession.messages."""
+        return list(self._agent.state.messages)
+
+    @property
+    def steering_mode(self) -> str:
+        return self._steering_mode
+
+    @property
+    def follow_up_mode(self) -> str:
+        return self._follow_up_mode
+
+    @property
+    def session_file(self) -> str | None:
+        return self._session_manager.get_session_file()
+
+    @property
+    def session_name(self) -> str | None:
+        return self._session_manager.get_session_name()
+
+    def set_steering_mode(self, mode: str) -> None:
+        """Set steering queue mode and persist to settings."""
+        if mode not in ("all", "one-at-a-time"):
+            raise ValueError(f"Invalid steering mode: {mode}")
+        self._steering_mode = mode
+        self._agent.set_steering_mode(mode)
+        if hasattr(self._settings_manager, "set_steering_mode"):
+            self._settings_manager.set_steering_mode(mode)
+        else:
+            self._settings_manager.save_global("steeringMode", mode)
+
+    def set_follow_up_mode(self, mode: str) -> None:
+        """Set follow-up queue mode and persist to settings."""
+        if mode not in ("all", "one-at-a-time"):
+            raise ValueError(f"Invalid follow-up mode: {mode}")
+        self._follow_up_mode = mode
+        self._agent.set_follow_up_mode(mode)
+        if hasattr(self._settings_manager, "set_follow_up_mode"):
+            self._settings_manager.set_follow_up_mode(mode)
+        else:
+            self._settings_manager.save_global("followUpMode", mode)
+
+    def abort_retry(self) -> None:
+        """Public alias for cancelling in-progress retry (RPC abort_retry)."""
+        self._abort_retry()
 
     # ── Queue management ──────────────────────────────────────────────────────
 
     @property
     def pending_message_count(self) -> int:
-        return (len(self._agent._steering_queue)
-                + len(self._agent._follow_up_queue))
+        return (
+            len(self._agent.peek_steering_messages())
+            + len(self._agent.peek_follow_up_messages())
+        )
 
     def get_steering_messages(self) -> list[str]:
-        return [getattr(m, "content", str(m)) for m in self._agent._steering_queue]
+        return [getattr(m, "content", str(m)) for m in self._agent.peek_steering_messages()]
 
     def get_follow_up_messages(self) -> list[str]:
-        return [getattr(m, "content", str(m)) for m in self._agent._follow_up_queue]
+        return [getattr(m, "content", str(m)) for m in self._agent.peek_follow_up_messages()]
 
     def clear_queue(self) -> dict[str, list]:
-        steering = list(self._agent._steering_queue)
-        follow_up = list(self._agent._follow_up_queue)
+        steering = self._agent.peek_steering_messages()
+        follow_up = self._agent.peek_follow_up_messages()
         self._agent.clear_all_queues()
         return {"steering": steering, "followUp": follow_up}
 
@@ -650,8 +835,8 @@ class AgentSession:
             raise RuntimeError(f"No API key for {model.provider}/{model.id}")
         self._agent.set_model(model)
         self._session_manager.append_model_change(model.provider, model.id)
-        # Re-clamp thinking level for new model
-        self.set_thinking_level(self.thinking_level)
+        # Per-model default takes priority; otherwise keep/clamp current level
+        self.set_thinking_level(self._get_thinking_level_for_model_switch(model))
 
     async def cycle_model(self, direction: str = "forward") -> dict | None:
         """
@@ -684,14 +869,40 @@ class AgentSession:
             return list(_THINKING_LEVELS_WITH_XHIGH)
         return list(_THINKING_LEVELS)
 
-    def set_thinking_level(self, level: ThinkingLevel) -> None:
-        """Set thinking level, clamped to model capabilities. Persists to session."""
+    def set_thinking_level(self, level: ThinkingLevel, persist: bool = False) -> None:
+        """Set thinking level, clamped to model capabilities.
+
+        Always writes a session transcript entry when the level changes.
+        When persist=True, also saves the requested level as the global default.
+        """
         available = self.get_available_thinking_levels()
         effective = level if level in available else _clamp_thinking_level(level, available)
         is_changing = effective != self._agent.state.thinking_level
         self._agent.set_thinking_level(effective)
+        if persist:
+            self._settings_manager.set_default_thinking_level(level)
         if is_changing:
             self._session_manager.append_thinking_level_change(effective)
+
+    def _get_thinking_level_for_model_switch(
+        self,
+        target_model: Model | None = None,
+        explicit_level: ThinkingLevel | None = None,
+    ) -> ThinkingLevel:
+        """Resolve thinking level when switching models. Mirrors TS _getThinkingLevelForModelSwitch."""
+        if explicit_level is not None:
+            return explicit_level
+        if target_model is not None:
+            per_model = self._settings_manager.get_model_thinking_level(
+                target_model.provider, target_model.id
+            )
+            if per_model is not None:
+                return per_model  # type: ignore[return-value]
+        return (
+            self._settings_manager.get_default_thinking_level()
+            or self.thinking_level
+            or "medium"
+        )
 
     def cycle_thinking_level(self) -> ThinkingLevel | None:
         """
@@ -778,23 +989,8 @@ class AgentSession:
         return {"tokens": tokens, "contextWindow": context_window, "percent": percent}
 
     def _estimate_context_tokens(self) -> int:
-        """Estimate current context size from last assistant usage or message lengths."""
-        msgs = self._agent.state.messages
-        # Walk backwards to find last assistant message with usage
-        for m in reversed(msgs):
-            if getattr(m, "role", "") == "assistant":
-                usage = getattr(m, "usage", None)
-                if usage:
-                    inp = getattr(usage, "input", 0) or 0
-                    out = getattr(usage, "output", 0) or 0
-                    cr = getattr(usage, "cache_read", 0) or 0
-                    if inp + out + cr > 0:
-                        return inp + cr  # context tokens = input + cache_read
-        # Fallback: estimate from character count
-        total_chars = sum(
-            len(str(getattr(m, "content", ""))) for m in msgs
-        )
-        return total_chars // 4
+        """Estimate current context size from last valid assistant usage or message lengths."""
+        return int(estimate_context_tokens(self._agent.state.messages)["tokens"])
 
     # ── Session management ────────────────────────────────────────────────────
 
@@ -885,6 +1081,11 @@ class AgentSession:
             getattr(msg, "model", None) == model.id
         )
         if same_model and is_context_overflow(msg, context_window):
+            will_retry = getattr(msg, "stop_reason", "") != "stop"
+            if not will_retry:
+                # Successful overflow response: compact but do not retry
+                await self._run_auto_compaction("overflow", will_retry=False)
+                return
             if self._overflow_recovery_attempted:
                 # Already tried once — don't loop infinitely
                 self._emit({
@@ -906,16 +1107,20 @@ class AgentSession:
             await self._run_auto_compaction("overflow", will_retry=True)
             return
 
-        # Case 2: Threshold
-        if getattr(msg, "stop_reason", "") == "error":
-            return  # non-overflow errors have no usage data
-        tokens = self._estimate_context_tokens()
+        # Case 3: threshold compaction without retry.
+        # For error messages or all-zero usage, estimate from the last valid
+        # response so persistent API errors still compact.
+        from .compaction.compaction import calculate_context_tokens
+
+        usage = getattr(msg, "usage", None)
+        direct = calculate_context_tokens(usage) if usage else 0
+        if getattr(msg, "stop_reason", "") == "error" or direct == 0:
+            # Without provider usage, estimate.tokens is the pure message-size estimate.
+            context_tokens = estimate_context_tokens(self._agent.state.messages)["tokens"]
+        else:
+            context_tokens = direct
         reserve = settings.get("reserveTokens", 16384)
-        if context_window > 0 and should_compact(
-            self._agent.state.messages,
-            context_window,
-            (context_window - reserve) / context_window,
-        ):
+        if context_window > 0 and context_tokens > context_window - reserve:
             await self._run_auto_compaction("threshold", will_retry=False)
 
     async def _run_auto_compaction(self, reason: str, will_retry: bool) -> None:
@@ -1074,6 +1279,11 @@ class AgentSession:
             await self._retry_event.wait()
 
     # ── HTML export ───────────────────────────────────────────────────────────
+
+    def export_to_jsonl(self, output_path: str | None = None) -> str:
+        from .session_export import export_session_to_jsonl
+
+        return export_session_to_jsonl(self._session_manager, output_path)
 
     async def export_to_html(self, output_path: str | None = None) -> str:
         """Export current session messages to a basic HTML transcript."""

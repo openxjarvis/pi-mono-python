@@ -5,7 +5,7 @@ Wires up a ProcessTerminal + TUI + Editor to give a full interactive
 experience aligned with the TypeScript coding agent interactive mode.
 Falls back to a readline loop if pi_tui cannot start (e.g. not a TTY).
 
-Slash commands: /exit /clear /help /model /compact /thinking /session /tools
+Slash commands: /exit /clear /help /model /compact /thinking /session /tools /import /clone /trust
 Footer:         model | thinking: off | ctx: 12% | tokens: 8k/64k
 Ctrl+P:         cycle model
 """
@@ -184,9 +184,12 @@ async def _run_pi_tui(session: "AgentSession", initial_messages: list[str] | Non
         SlashCommand(name="help",     description="Show help"),
         SlashCommand(name="model",    description="List or switch models"),
         SlashCommand(name="compact",  description="Compact conversation context"),
-        SlashCommand(name="thinking", description="Cycle thinking level (off/minimal/low/medium/high)"),
+        SlashCommand(name="thinking", description="Set thinking level", argument_hint="<level>"),
         SlashCommand(name="session",  description="Show session statistics"),
         SlashCommand(name="tools",    description="List active tools"),
+        SlashCommand(name="import",   description="Import and resume a session from a JSONL file", argument_hint="<path.jsonl>"),
+        SlashCommand(name="clone",    description="Duplicate the current session at the current position"),
+        SlashCommand(name="trust",    description="Save project trust decision for future sessions"),
     ]
     autocomplete = CombinedAutocompleteProvider(commands=slash_commands)
     editor.set_autocomplete_provider(autocomplete)
@@ -224,9 +227,12 @@ async def _run_pi_tui(session: "AgentSession", initial_messages: list[str] | Non
                 f"  {cyan('/clear')}    — Clear conversation history",
                 f"  {cyan('/model')}    — List available models / switch model",
                 f"  {cyan('/compact')}  — Compact context to free tokens",
-                f"  {cyan('/thinking')} — Cycle thinking level",
+                f"  {cyan('/thinking')} [level] — Set or cycle thinking level",
                 f"  {cyan('/session')}  — Show session statistics",
                 f"  {cyan('/tools')}    — List active tools",
+                f"  {cyan('/import')}   — Import a session JSONL file",
+                f"  {cyan('/clone')}    — Duplicate the current session",
+                f"  {cyan('/trust')}    — Save project trust decision",
                 f"  {cyan('Ctrl+P')}    — Cycle to next model",
             ]
             append_history("\n".join(lines))
@@ -257,12 +263,25 @@ async def _run_pi_tui(session: "AgentSession", initial_messages: list[str] | Non
             tui.request_render()
             return
 
-        if stripped == "/thinking":
-            new_level = session.cycle_thinking_level()
-            if new_level:
-                append_history(f"{cyan('Thinking level:')} {new_level}")
+        if stripped == "/thinking" or stripped.startswith("/thinking "):
+            arg = stripped[10:].strip() if stripped.startswith("/thinking ") else ""
+            if arg:
+                available = session.get_available_thinking_levels()
+                match = next((lvl for lvl in available if lvl.lower() == arg.lower()), None)
+                if match:
+                    session.set_thinking_level(match, persist=False)
+                    append_history(f"{cyan('Thinking level:')} {match}")
+                else:
+                    append_history(
+                        f'{red("Unknown thinking level")} "{arg}". '
+                        f"Available: {', '.join(available)}."
+                    )
             else:
-                append_history(dim("Thinking not supported by current model."))
+                new_level = session.cycle_thinking_level()
+                if new_level:
+                    append_history(f"{cyan('Thinking level:')} {new_level}")
+                else:
+                    append_history(dim("Thinking not supported by current model."))
             update_footer()
             tui.request_render()
             return
@@ -287,6 +306,18 @@ async def _run_pi_tui(session: "AgentSession", initial_messages: list[str] | Non
             await _handle_model_command(stripped, session,
                                         append_history, update_footer, tui,
                                         cyan, dim, red, bold, green)
+            return
+
+        if stripped == "/import" or stripped.startswith("/import "):
+            await _handle_import_command(stripped, session, append_history, update_footer, tui, cyan, dim, red, green)
+            return
+
+        if stripped == "/clone":
+            await _handle_clone_command(session, append_history, update_footer, tui, cyan, red)
+            return
+
+        if stripped == "/trust" or stripped.startswith("/trust "):
+            _handle_trust_command(stripped, session, append_history, tui, cyan, dim, red, green)
             return
 
         # ── Busy guard ────────────────────────────────────────────────────────
@@ -588,4 +619,120 @@ async def _handle_model_command(
         lines.append(f"  {marker} {m.id} ({m.provider})")
     lines.append(dim("Use /model <id> to switch."))
     append_history("\n".join(lines))
+    tui.request_render()
+
+
+def _path_command_argument(text: str, command: str) -> str | None:
+    prefix = command + " "
+    if not text.startswith(prefix):
+        return None
+    args = text[len(prefix):].strip()
+    if not args:
+        return None
+    if args[0] in {'"', "'"}:
+        quote = args[0]
+        closing = args.find(quote, 1)
+        if closing < 0:
+            return None
+        return args[1:closing]
+    first_ws = len(args)
+    for index, ch in enumerate(args):
+        if ch.isspace():
+            first_ws = index
+            break
+    return args[:first_ws]
+
+
+async def _handle_import_command(
+    stripped: str,
+    session: "AgentSession",
+    append_history,
+    update_footer,
+    tui,
+    cyan, dim, red, green,
+) -> None:
+    input_path = _path_command_argument(stripped, "/import")
+    if not input_path:
+        append_history(f"{red('Usage:')} /import <path.jsonl>")
+        tui.request_render()
+        return
+    try:
+        result = await session.import_from_jsonl(input_path)
+        if isinstance(result, dict) and result.get("cancelled"):
+            append_history(dim("Import cancelled"))
+        else:
+            append_history(f"{green('Session imported from:')} {input_path}")
+            update_footer()
+    except FileNotFoundError as exc:
+        append_history(f"{red('Failed to import session:')} {exc}")
+    except Exception as exc:
+        append_history(f"{red('Failed to import session:')} {exc}")
+    tui.request_render()
+
+
+async def _handle_clone_command(
+    session: "AgentSession",
+    append_history,
+    update_footer,
+    tui,
+    cyan, red,
+) -> None:
+    try:
+        result = await session.clone()
+        if isinstance(result, dict) and result.get("cancelled"):
+            append_history("Clone cancelled")
+        else:
+            append_history(f"{cyan('Cloned session:')} {session.session_id}")
+            update_footer()
+    except Exception as exc:
+        append_history(f"{red('Clone failed:')} {exc}")
+    tui.request_render()
+
+
+def _handle_trust_command(
+    stripped: str,
+    session: "AgentSession",
+    append_history,
+    tui,
+    cyan, dim, red, green,
+) -> None:
+    from pi_coding_agent.config import get_agent_dir
+    from pi_coding_agent.core.trust_manager import ProjectTrustStore, get_project_trust_options
+
+    store = ProjectTrustStore(get_agent_dir())
+    cwd = session.cwd
+    arg = stripped[6:].strip() if stripped.startswith("/trust ") else ""
+    options = get_project_trust_options(cwd)
+    saved = store.get_entry(cwd)
+
+    if not arg:
+        lines = [
+            f"{cyan('Project trust')}",
+            f"  cwd: {cwd}",
+            f"  saved: {('trusted' if saved.decision else 'untrusted') + ' (' + saved.path + ')' if saved else 'none'}",
+            dim("Usage: /trust trust | /trust parent | /trust no"),
+        ]
+        for option in options:
+            lines.append(f"  - {option.label}")
+        append_history("\n".join(lines))
+        tui.request_render()
+        return
+
+    key = arg.lower()
+    selected = None
+    if key in {"trust", "yes", "true"}:
+        selected = options[0]
+    elif key in {"parent", "parent-folder"}:
+        selected = next((opt for opt in options if opt.saved_path and opt.saved_path != options[0].saved_path), None)
+    elif key in {"no", "false", "untrust", "do-not-trust"}:
+        selected = next((opt for opt in options if not opt.trusted), None)
+    if selected is None:
+        append_history(f'{red("Unknown trust option")} "{arg}". Use trust, parent, or no.')
+        tui.request_render()
+        return
+    if selected.updates:
+        store.set_many(selected.updates)
+    if hasattr(session._settings_manager, "set_project_trusted"):
+        session._settings_manager.set_project_trusted(selected.trusted)
+    append_history(f"{green('Trust decision saved:')} {selected.label}")
     tui.request_render()

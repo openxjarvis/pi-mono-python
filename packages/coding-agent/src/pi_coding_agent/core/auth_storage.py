@@ -32,8 +32,8 @@ class AuthStorage:
     def _load(self) -> None:
         if os.path.exists(self.AUTH_FILE):
             try:
-                with open(self.AUTH_FILE, encoding="utf-8") as f:
-                    self._data = json.load(f)
+                from pi_coding_agent.utils.text import load_json_file
+                self._data = load_json_file(self.AUTH_FILE)
             except (json.JSONDecodeError, IOError):
                 self._data = {}
         self._loaded = True

@@ -41,8 +41,8 @@ def migrate_auth_to_auth_json() -> list[str]:
 
     if os.path.exists(oauth_path):
         try:
-            with open(oauth_path, encoding="utf-8") as f:
-                oauth = json.load(f)
+            from pi_coding_agent.utils.text import load_json_file
+            oauth = load_json_file(oauth_path)
             for provider, cred in oauth.items():
                 migrated[provider] = {"type": "oauth", **(cred if isinstance(cred, dict) else {})}
                 providers.append(provider)
@@ -52,8 +52,8 @@ def migrate_auth_to_auth_json() -> list[str]:
 
     if os.path.exists(settings_path):
         try:
-            with open(settings_path, encoding="utf-8") as f:
-                settings = json.load(f)
+            from pi_coding_agent.utils.text import load_json_file
+            settings = load_json_file(settings_path)
             api_keys = settings.get("apiKeys", {})
             if isinstance(api_keys, dict):
                 for provider, key in api_keys.items():

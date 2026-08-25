@@ -1,0 +1,24 @@
+[project]
+name = "pi-client"
+version = "0.53.0"
+description = "Transport-neutral client for remote pi sessions — Python mirror of @earendil-works/pi-client"
+requires-python = ">=3.11"
+dependencies = [
+    "pi-protocol",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pi_client"]
+
+[tool.uv.sources]
+pi-protocol = { workspace = true }

@@ -13,7 +13,18 @@ dev = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/ai", "packages/agent", "packages/coding-agent", "packages/tui"]
+members = [
+    "packages/ai",
+    "packages/agent",
+    "packages/coding-agent",
+    "packages/tui",
+    "packages/telemetry",
+    "packages/protocol",
+    "packages/client",
+    "packages/server",
+    "packages/session-backends/sqlite-node",
+    "packages/evals",
+]
 
 [tool.ruff]
 line-length = 120
@@ -31,4 +42,10 @@ testpaths = [
     "packages/agent/tests",
     "packages/coding-agent/tests",
     "packages/tui/tests",
+    "packages/telemetry/tests",
+    "packages/protocol/tests",
+    "packages/client/tests",
+    "packages/server/tests",
+    "packages/session-backends/sqlite-node/tests",
+    "packages/evals/tests",
 ]

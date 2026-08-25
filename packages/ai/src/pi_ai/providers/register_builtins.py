@@ -92,23 +92,6 @@ def register_builtins() -> None:
     except ImportError:
         pass
 
-    # Google Gemini CLI / Cloud Code Assist
-    try:
-        from pi_ai.providers.google_gemini_cli import stream_google_gemini_cli
-        from pi_ai.providers.google_gemini_cli import stream_simple_google_gemini_cli
-        register_api_provider(
-            "google-gemini-cli",
-            _StreamFnProvider(stream_google_gemini_cli, stream_simple_google_gemini_cli),
-            source_id="builtin",
-        )
-        register_api_provider(
-            "google-antigravity",
-            _StreamFnProvider(stream_google_gemini_cli, stream_simple_google_gemini_cli),
-            source_id="builtin",
-        )
-    except ImportError:
-        pass
-
     # Amazon Bedrock Converse Stream
     try:
         from pi_ai.providers.amazon_bedrock import stream_bedrock
@@ -133,10 +116,32 @@ def register_builtins() -> None:
     except ImportError:
         pass
 
+    # Mistral Conversations API
+    try:
+        from pi_ai.providers.mistral import stream_mistral, stream_simple_mistral
+        register_api_provider(
+            "mistral-conversations",
+            _StreamFnProvider(stream_mistral, stream_simple_mistral),
+            source_id="builtin",
+        )
+    except ImportError:
+        pass
+
+    try:
+        from pi_ai.providers.pi_messages import stream_simple_pi_messages
+        register_api_provider(
+            "pi-messages",
+            _StreamFnProvider(stream_simple_pi_messages, stream_simple_pi_messages),
+            source_id="builtin",
+        )
+    except ImportError:
+        pass
+
 
 def reset_api_providers() -> None:
-    """Reset all registered providers (for testing purposes)."""
+    """Reset all registered providers and re-register builtins."""
     global _registered
     from pi_ai.api_registry import _registry
     _registry.clear()
     _registered = False
+    register_builtins()

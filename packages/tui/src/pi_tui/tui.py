@@ -18,8 +18,15 @@ from typing import Callable, Protocol, runtime_checkable
 
 from .keys import is_key_release, matches_key
 from .terminal import Terminal
+from .terminal_colors import (
+    RgbColor,
+    TerminalColorScheme,
+    is_osc11_background_color_response,
+    parse_osc11_background_color,
+    parse_terminal_color_scheme_report,
+)
 from .terminal_image import get_capabilities, is_image_line, set_cell_dimensions, CellDimensions
-from .utils import extract_segments, slice_by_column, slice_with_width, visible_width
+from .utils import extract_segments, normalize_terminal_output, slice_by_column, slice_with_width, visible_width
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +129,12 @@ class OverlayEntry:
     focus_order: int = 0  # NEW: For sorting overlays by focus order
 
 
+@dataclass
+class OverlayUnfocusOptions:
+    """Options for OverlayHandle.unfocus()."""
+    target: object | None = None
+
+
 class OverlayHandle:
     """Handle returned by show_overlay(). Controls overlay visibility and focus."""
 
@@ -147,23 +160,33 @@ class OverlayHandle:
 
     def is_hidden(self) -> bool:
         return self._is_hidden()
-    
+
     def focus(self) -> None:
-        """Set focus to this overlay."""
-        self._tui._focused_overlay = self._entry
+        """Focus this overlay and bring it to the visual front."""
+        if self._entry not in self._tui._overlay_stack or not self._tui._is_overlay_visible(self._entry):
+            return
         self._entry.focus_order = self._tui._next_focus_order
         self._tui._next_focus_order += 1
+        self._tui.set_focus(self._entry.component)
+        self._tui._focused_overlay = self._entry
         self._tui.request_render()
-    
-    def unfocus(self) -> None:
-        """Remove focus from this overlay."""
-        if self._tui._focused_overlay == self._entry:
-            self._tui._focused_overlay = None
-            self._tui.request_render()
-    
+
+    def unfocus(self, options: OverlayUnfocusOptions | None = None) -> None:
+        """Release focus to the next visible capturing overlay, pre-focus, or an explicit target."""
+        is_focused = self._tui._focused_component is self._entry.component
+        if not is_focused and options is None:
+            return
+        if is_focused or options is not None:
+            top = self._tui._get_topmost_visible_overlay()
+            fallback = top.component if top and top is not self._entry else self._entry.pre_focus
+            self._tui.set_focus(options.target if options else fallback)
+            if self._tui._focused_overlay is self._entry:
+                self._tui._focused_overlay = None
+        self._tui.request_render()
+
     def is_focused(self) -> bool:
-        """Check if this overlay has focus."""
-        return self._tui._focused_overlay == self._entry
+        """Check if this overlay currently has focus."""
+        return self._tui._focused_component is self._entry.component
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,6 +239,66 @@ InputListener = Callable[[str], InputListenerResult]
 
 _SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07"
 
+TuiMode = str  # "regular" | "fullscreen"
+
+
+@dataclass
+class TuiStopOptions:
+    """Options for TUI.stop()."""
+
+    preserve_screen: bool = False
+
+
+VIEWPORT_TUI = object()
+
+
+def is_viewport_tui(tui: object) -> bool:
+    return getattr(tui, "is_viewport_tui", False) is True
+
+
+def _as_stop_options(options: TuiStopOptions | dict | None) -> TuiStopOptions:
+    if options is None:
+        return TuiStopOptions()
+    if isinstance(options, TuiStopOptions):
+        return options
+    return TuiStopOptions(preserve_screen=bool(options.get("preserve_screen")))
+
+
+def composite_tui_line(
+    base_line: str,
+    overlay_line: str,
+    start_col: int,
+    overlay_width: int,
+    total_width: int,
+) -> str:
+    """Composite overlay content into a terminal line at a fixed column."""
+    if is_image_line(base_line):
+        return base_line
+
+    after_start = start_col + overlay_width
+    base = extract_segments(base_line, start_col, after_start, total_width - after_start, True)
+    overlay = slice_with_width(overlay_line, 0, overlay_width, True)
+    before_pad = max(0, start_col - base.before_width)
+    overlay_pad = max(0, overlay_width - overlay.width)
+    actual_before_w = max(start_col, base.before_width)
+    actual_overlay_w = max(overlay_width, overlay.width)
+    after_target = max(0, total_width - actual_before_w - actual_overlay_w)
+    after_pad = max(0, after_target - base.after_width)
+
+    result = (
+        base.before
+        + " " * before_pad
+        + _SEGMENT_RESET
+        + overlay.text
+        + " " * overlay_pad
+        + _SEGMENT_RESET
+        + base.after
+        + " " * after_pad
+    )
+    if visible_width(result) <= total_width:
+        return result
+    return slice_by_column(result, 0, total_width, True)
+
 
 class TUI(Container):
     """
@@ -253,6 +336,13 @@ class TUI(Container):
         self._focused_overlay: OverlayEntry | None = None  # NEW: Track focused overlay
         self._next_focus_order: int = 0  # NEW: For focus ordering
         self._main_loop: "asyncio.AbstractEventLoop | None" = None
+        self._terminal_color_scheme_listeners: list[Callable[[TerminalColorScheme], None]] = []
+        self._terminal_color_scheme_notifications_enabled = False
+        self._pending_osc11_queries: list[dict] = []
+
+    @property
+    def mode(self) -> TuiMode:
+        return "regular"
 
     @property
     def stopped(self) -> bool:
@@ -346,18 +436,63 @@ class TUI(Container):
         return OverlayHandle(_hide, _set_hidden, _is_hidden, entry, self)
 
     def hide_overlay(self) -> None:
-        """Hide the topmost overlay and restore previous focus."""
+        """Hide the topmost overlay. Restore focus only if that overlay had focus."""
         if not self._overlay_stack:
             return
         overlay = self._overlay_stack.pop()
-        top = self._get_topmost_visible_overlay()
-        self.set_focus(top.component if top else overlay.pre_focus)
+        if self._focused_component is overlay.component:
+            top = self._get_topmost_visible_overlay()
+            self.set_focus(top.component if top else overlay.pre_focus)
+        if self._focused_overlay is overlay:
+            self._focused_overlay = None
         if not self._overlay_stack:
             self.terminal.hide_cursor()
         self.request_render()
 
     def has_overlay(self) -> bool:
         return any(self._is_overlay_visible(o) for o in self._overlay_stack)
+
+    @property
+    def has_overlay_entries(self) -> bool:
+        return bool(self._overlay_stack)
+
+    def _is_overlay_focused(self) -> bool:
+        return any(
+            entry.component is self._focused_component and self._is_overlay_visible(entry)
+            for entry in self._overlay_stack
+        )
+
+    def _get_mounted_roots(self) -> list:
+        return list(self.children)
+
+    def _reset_render_state(self) -> None:
+        self._previous_lines = []
+        self._previous_width = -1
+        self._previous_height = -1
+        self._cursor_row = 0
+        self._hardware_cursor_row = 0
+        self._max_lines_rendered = 0
+        self._previous_viewport_top = 0
+
+    def _before_terminal_start(self) -> None:
+        return
+
+    def _after_terminal_start(self) -> None:
+        return
+
+    def _before_terminal_stop(self, options: TuiStopOptions) -> None:
+        if options.preserve_screen or not self._previous_lines:
+            return
+        target_row = len(self._previous_lines)
+        line_diff = target_row - self._hardware_cursor_row
+        if line_diff > 0:
+            self.terminal.write(f"\x1b[{line_diff}B")
+        elif line_diff < 0:
+            self.terminal.write(f"\x1b[{-line_diff}A")
+        self.terminal.write("\r\n")
+
+    def _after_terminal_stop(self, _options: TuiStopOptions) -> None:
+        return
 
     def _is_overlay_visible(self, entry: OverlayEntry) -> bool:
         if entry.hidden:
@@ -367,18 +502,21 @@ class TUI(Container):
         return True
 
     def _get_topmost_visible_overlay(self) -> OverlayEntry | None:
-        """Find the topmost visible capturing overlay, if any."""
-        for i in range(len(self._overlay_stack) - 1, -1, -1):
-            entry = self._overlay_stack[i]
-            # Skip non-capturing overlays
+        """Find the visual-frontmost visible capturing overlay, if any."""
+        topmost: OverlayEntry | None = None
+        for entry in self._overlay_stack:
             if entry.options and entry.options.non_capturing:
                 continue
-            if self._is_overlay_visible(entry):
-                return entry
-        return None
+            if not self._is_overlay_visible(entry):
+                continue
+            if topmost is None or entry.focus_order > topmost.focus_order:
+                topmost = entry
+        return topmost
 
     def invalidate(self) -> None:
-        super().invalidate()
+        for root in self._get_mounted_roots():
+            if hasattr(root, "invalidate"):
+                root.invalidate()
         for overlay in self._overlay_stack:
             if hasattr(overlay.component, "invalidate"):
                 overlay.component.invalidate()  # type: ignore
@@ -395,11 +533,15 @@ class TUI(Container):
                 self._main_loop = _asyncio.get_event_loop()
             except RuntimeError:
                 self._main_loop = None
+        self._before_terminal_start()
         self.terminal.start(
             lambda data: self._handle_input(data),
             lambda: self.request_render(),
         )
+        self._after_terminal_start()
         self.terminal.hide_cursor()
+        if self._terminal_color_scheme_notifications_enabled:
+            self.terminal.write("\x1b[?2031h")
         self._query_cell_size()
         self.request_render()
 
@@ -420,34 +562,119 @@ class TUI(Container):
         except ValueError:
             pass
 
+    def on_terminal_color_scheme_change(
+        self,
+        listener: Callable[[TerminalColorScheme], None],
+    ) -> Callable[[], None]:
+        self._terminal_color_scheme_listeners.append(listener)
+
+        def _remove() -> None:
+            try:
+                self._terminal_color_scheme_listeners.remove(listener)
+            except ValueError:
+                pass
+
+        return _remove
+
+    def set_terminal_color_scheme_notifications(self, enabled: bool) -> None:
+        if self._terminal_color_scheme_notifications_enabled == enabled:
+            return
+        self._terminal_color_scheme_notifications_enabled = enabled
+        if not self._stopped:
+            self.terminal.write("\x1b[?2031h" if enabled else "\x1b[?2031l")
+
+    def query_terminal_background_color(self, timeout_ms: int) -> "asyncio.Future[RgbColor | None]":
+        import asyncio
+        loop = self._main_loop
+        try:
+            loop = loop or asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        future: asyncio.Future[RgbColor | None] = loop.create_future()
+
+        def _timeout() -> None:
+            if not future.done():
+                future.set_result(None)
+
+        handle = loop.call_later(timeout_ms / 1000.0, _timeout)
+        self._pending_osc11_queries.append({"future": future, "timer": handle})
+        self.terminal.write("\x1b]11;?\x07")
+        return future
+
+    def query_terminal_color_scheme(self, timeout_ms: int) -> "asyncio.Future[TerminalColorScheme | None]":
+        import asyncio
+        loop = self._main_loop
+        try:
+            loop = loop or asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        future: asyncio.Future[TerminalColorScheme | None] = loop.create_future()
+
+        def settle(scheme: TerminalColorScheme | None) -> None:
+            if future.done():
+                return
+            future.set_result(scheme)
+
+        unsubscribe = self.on_terminal_color_scheme_change(lambda scheme: settle(scheme))
+        handle = loop.call_later(timeout_ms / 1000.0, lambda: (unsubscribe(), settle(None)))
+
+        def _cleanup_done(_fut: object) -> None:
+            handle.cancel()
+            unsubscribe()
+
+        future.add_done_callback(_cleanup_done)
+        self.terminal.write("\x1b[?996n")
+        return future
+
+    def _consume_osc11_background_response(self, data: str) -> bool:
+        if not self._pending_osc11_queries:
+            return False
+        if not is_osc11_background_color_response(data):
+            return False
+        rgb = parse_osc11_background_color(data)
+        query = self._pending_osc11_queries.pop(0)
+        timer = query.get("timer")
+        if timer is not None:
+            timer.cancel()
+        future = query.get("future")
+        if future is not None and not future.done():
+            future.set_result(rgb)
+        return True
+
+    def _consume_terminal_color_scheme_report(self, data: str) -> bool:
+        scheme = parse_terminal_color_scheme_report(data)
+        if scheme is None:
+            return False
+        for listener in list(self._terminal_color_scheme_listeners):
+            listener(scheme)
+        return True
+
     def _query_cell_size(self) -> None:
         if not get_capabilities().images:
             return
         self._cell_size_query_pending = True
         self.terminal.write("\x1b[16t")
 
-    def stop(self) -> None:
+    def stop(self, options: TuiStopOptions | dict | None = None) -> None:
         self._stopped = True
-        if self._previous_lines:
-            target_row = len(self._previous_lines)
-            line_diff = target_row - self._hardware_cursor_row
-            if line_diff > 0:
-                self.terminal.write(f"\x1b[{line_diff}B")
-            elif line_diff < 0:
-                self.terminal.write(f"\x1b[{-line_diff}A")
-            self.terminal.write("\r\n")
+        if self._terminal_color_scheme_notifications_enabled:
+            self.terminal.write("\x1b[?2031l")
+        stop_options = _as_stop_options(options)
+        self._before_terminal_stop(stop_options)
         self.terminal.show_cursor()
         self.terminal.stop()
+        self._after_terminal_stop(stop_options)
+
+    def render_now(self, force: bool = False) -> None:
+        """Render immediately, bypassing the coalesced request_render path."""
+        if force:
+            self._reset_render_state()
+        self._render_requested = False
+        self._do_render()
 
     def request_render(self, force: bool = False) -> None:
         if force:
-            self._previous_lines = []
-            self._previous_width = -1
-            self._previous_height = -1
-            self._cursor_row = 0
-            self._hardware_cursor_row = 0
-            self._max_lines_rendered = 0
-            self._previous_viewport_top = 0
+            self._reset_render_state()
         if self._render_requested:
             return
         self._render_requested = True
@@ -492,6 +719,11 @@ class TUI(Container):
             raise
 
     def _handle_input(self, data: str) -> None:
+        if self._consume_osc11_background_response(data):
+            return
+        if self._consume_terminal_color_scheme_report(data):
+            return
+
         if self._input_listeners:
             current = data
             for listener in list(self._input_listeners):
@@ -538,24 +770,24 @@ class TUI(Container):
             self.request_render()
 
     def _parse_cell_size_response(self) -> str:
+        """Consume only an exact CSI 6 ; height ; width t reply so lone Escape is not swallowed."""
         import re
-        pattern = re.compile(r"\x1b\[6;(\d+);(\d+)t")
-        m = pattern.search(self._input_buffer)
-        if m:
-            h_px = int(m.group(1))
-            w_px = int(m.group(2))
+        exact = re.fullmatch(r"\x1b\[6;(\d+);(\d+)t", self._input_buffer)
+        if exact:
+            h_px = int(exact.group(1))
+            w_px = int(exact.group(2))
             if h_px > 0 and w_px > 0:
                 set_cell_dimensions(CellDimensions(width_px=w_px, height_px=h_px))
                 self.invalidate()
                 self.request_render()
-            self._input_buffer = self._input_buffer[:m.start()] + self._input_buffer[m.end():]
+            self._input_buffer = ""
             self._cell_size_query_pending = False
+            return ""
 
-        partial = re.compile(r"\x1b(\[6?;?[\d;]*)?$")
-        if partial.search(self._input_buffer):
-            last = self._input_buffer[-1] if self._input_buffer else ""
-            if not (last and last.isalpha() or last in ("~",)):
-                return ""
+        # Also accept the exact reply when it arrives as a standalone chunk mixed with other input.
+        embedded = re.search(r"^\x1b\[6;(\d+);(\d+)t$", self._input_buffer)
+        if embedded and embedded.group(0) == self._input_buffer:
+            return ""
 
         result = self._input_buffer
         self._input_buffer = ""
@@ -682,7 +914,9 @@ class TUI(Container):
             rendered.append((overlay_lines, row, col, w))
             min_lines_needed = max(min_lines_needed, row + len(overlay_lines))
 
-        working_h = max(self._max_lines_rendered, min_lines_needed)
+        # Pad to at least terminal height. Do not use max_lines_rendered — that
+        # historical high-water mark inflated scrollback on terminal widen.
+        working_h = max(len(result), term_height, min_lines_needed)
         while len(result) < working_h:
             result.append("")
 
@@ -707,7 +941,7 @@ class TUI(Container):
     def _apply_line_resets(self, lines: list[str]) -> list[str]:
         for i, line in enumerate(lines):
             if not is_image_line(line):
-                lines[i] = line + _SEGMENT_RESET
+                lines[i] = normalize_terminal_output(line) + _SEGMENT_RESET
         return lines
 
     def _composite_line_at(
@@ -718,35 +952,7 @@ class TUI(Container):
         overlay_width: int,
         total_width: int,
     ) -> str:
-        if is_image_line(base_line):
-            return base_line
-
-        after_start = start_col + overlay_width
-        base = extract_segments(base_line, start_col, after_start, total_width - after_start, True)
-        overlay = slice_with_width(overlay_line, 0, overlay_width, True)
-
-        before_pad = max(0, start_col - base.before_width)
-        overlay_pad = max(0, overlay_width - overlay.width)
-        actual_before_w = max(start_col, base.before_width)
-        actual_overlay_w = max(overlay_width, overlay.width)
-        after_target = max(0, total_width - actual_before_w - actual_overlay_w)
-        after_pad = max(0, after_target - base.after_width)
-
-        r = _SEGMENT_RESET
-        result = (
-            base.before
-            + " " * before_pad
-            + r
-            + overlay.text
-            + " " * overlay_pad
-            + r
-            + base.after
-            + " " * after_pad
-        )
-
-        if visible_width(result) <= total_width:
-            return result
-        return slice_by_column(result, 0, total_width, True)
+        return composite_tui_line(base_line, overlay_line, start_col, overlay_width, total_width)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Cursor marker extraction

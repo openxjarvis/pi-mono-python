@@ -12,6 +12,7 @@ from pathlib import Path
 
 # App metadata (mirrors piConfig in package.json)
 APP_NAME: str = "pi"
+APP_TITLE: str = "pi"
 CONFIG_DIR_NAME: str = ".pi"
 
 try:

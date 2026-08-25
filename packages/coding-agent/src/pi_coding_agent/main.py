@@ -11,17 +11,23 @@ from .cli_sub.args import parse_args, print_help
 from .cli_sub.file_processor import process_file_arguments
 from .cli_sub.list_models import list_models
 from .cli_sub.session_picker import select_session
-from .config import APP_NAME, get_agent_dir
+from .config import get_agent_dir
 from .core.auth_storage import AuthStorage
 from .core.event_bus import create_event_bus
 from .core.extensions.loader import load_extensions
 from .core.model_registry import ModelRegistry
-from .core.package_manager import DefaultPackageManager
 from .core.sdk import CreateAgentSessionOptions, create_agent_session
 from .core.session_manager import SessionManager
 from .core.settings_manager import SettingsManager
 from .migrations import run_migrations, show_deprecation_warnings
 from .modes import run_interactive_mode, run_print_mode, run_rpc_mode
+from .package_manager_cli import (
+    get_package_command_usage,
+    parse_package_command,
+    print_package_command_help,
+    run_config_command,
+    run_package_command,
+)
 
 
 def _load_env_files(cwd: str) -> None:
@@ -123,166 +129,61 @@ def _report_settings_errors(settings_manager: SettingsManager, context: str) -> 
         print(f"Warning ({context}, {scope} settings): {message}", file=sys.stderr)
 
 
+def _create_session_options(
+    parsed: Any,
+    *,
+    cwd: str,
+    session_manager: SessionManager | None,
+    auth_storage: AuthStorage,
+    model_registry: ModelRegistry,
+    settings_manager: SettingsManager,
+) -> CreateAgentSessionOptions:
+    """Build SDK options. Leave thinking_level unset so settings/DEFAULT apply."""
+    model = None
+    if parsed.model or parsed.provider:
+        try:
+            model = model_registry.resolve_model(model_id=parsed.model, provider=parsed.provider)
+        except Exception:
+            pass
+    return CreateAgentSessionOptions(
+        cwd=cwd,
+        agent_dir=get_agent_dir(),
+        model=model,
+        thinking_level=parsed.thinking,
+        session_manager=session_manager,
+        auth_storage=auth_storage,
+        model_registry=model_registry,
+        settings_manager=settings_manager,
+    )
+
+
 def _parse_package_command(args: Sequence[str]) -> dict[str, Any] | None:
-    if not args:
+    parsed = parse_package_command(list(args))
+    if not parsed:
         return None
-    command = args[0]
-    if command not in {"install", "remove", "update", "list"}:
-        return None
-
-    source: str | None = None
-    local = False
-    help_requested = False
-    invalid_option: str | None = None
-    for arg in args[1:]:
-        if arg in {"-h", "--help"}:
-            help_requested = True
-            continue
-        if arg in {"-l", "--local"}:
-            if command in {"install", "remove"}:
-                local = True
-            else:
-                invalid_option = invalid_option or arg
-            continue
-        if arg.startswith("-"):
-            invalid_option = invalid_option or arg
-            continue
-        if source is None:
-            source = arg
-
     return {
-        "command": command,
-        "source": source,
-        "local": local,
-        "help": help_requested,
-        "invalid_option": invalid_option,
+        "command": parsed["command"],
+        "source": parsed.get("source"),
+        "local": parsed.get("local", False),
+        "help": parsed.get("help", False),
+        "invalid_option": parsed.get("invalid_option"),
     }
 
 
 def _package_usage(command: str) -> str:
-    if command == "install":
-        return f"{APP_NAME} install <source> [-l]"
-    if command == "remove":
-        return f"{APP_NAME} remove <source> [-l]"
-    if command == "update":
-        return f"{APP_NAME} update [source]"
-    return f"{APP_NAME} list"
+    return get_package_command_usage(command)  # type: ignore[arg-type]
 
 
 def _print_package_help(command: str) -> None:
-    usage = _package_usage(command)
-    if command == "install":
-        print(f"Usage:\n  {usage}\n\nInstall a package and add it to settings.\n")
-    elif command == "remove":
-        print(f"Usage:\n  {usage}\n\nRemove a package and its source from settings.\n")
-    elif command == "update":
-        print(f"Usage:\n  {usage}\n\nUpdate installed packages.\n")
-    else:
-        print(f"Usage:\n  {usage}\n\nList installed packages from user and project settings.\n")
+    print_package_command_help(command)  # type: ignore[arg-type]
 
 
 async def _handle_package_command(args: Sequence[str]) -> tuple[bool, int]:
-    parsed = _parse_package_command(args)
-    if not parsed:
-        return False, 0
-
-    command = parsed["command"]
-    source = parsed["source"]
-    local = parsed["local"]
-
-    if parsed["help"]:
-        _print_package_help(command)
-        return True, 0
-    if parsed["invalid_option"]:
-        print(f'Unknown option {parsed["invalid_option"]} for "{command}".', file=sys.stderr)
-        print(f'Use "{APP_NAME} --help" or "{_package_usage(command)}".', file=sys.stderr)
-        return True, 1
-    if command in {"install", "remove"} and not source:
-        print(f"Missing {command} source.", file=sys.stderr)
-        print(f"Usage: {_package_usage(command)}", file=sys.stderr)
-        return True, 1
-
-    cwd = os.getcwd()
-    settings_manager = SettingsManager.create(cwd, get_agent_dir())
-    _report_settings_errors(settings_manager, "package command")
-    package_manager = DefaultPackageManager(cwd=cwd, agent_dir=get_agent_dir(), settings_manager=settings_manager)
-    package_manager.set_progress_callback(
-        lambda event: print(event.message, file=sys.stderr) if event.type == "start" and event.message else None
-    )
-
-    try:
-        if command == "install":
-            await package_manager.install(source, {"local": local})
-            package_manager.add_source_to_settings(source, {"local": local})
-            print(f"Installed {source}")
-            return True, 0
-        if command == "remove":
-            await package_manager.remove(source, {"local": local})
-            removed = package_manager.remove_source_from_settings(source, {"local": local})
-            if not removed:
-                print(f"No matching package found for {source}", file=sys.stderr)
-                return True, 1
-            print(f"Removed {source}")
-            return True, 0
-        if command == "list":
-            global_settings = settings_manager.get_global_settings()
-            project_settings = settings_manager.get_project_settings()
-            global_packages = global_settings.get("packages", []) or []
-            project_packages = project_settings.get("packages", []) or []
-            if not global_packages and not project_packages:
-                print("No packages installed.")
-                return True, 0
-
-            def _format_pkg(pkg: Any, scope: str) -> None:
-                source_str = pkg if isinstance(pkg, str) else pkg.get("source", "")
-                filtered = isinstance(pkg, dict)
-                display = f"{source_str} (filtered)" if filtered else source_str
-                print(f"  {display}")
-                installed = package_manager.get_installed_path(source_str, "user" if scope == "user" else "project")
-                if installed:
-                    print(f"    {installed}")
-
-            if global_packages:
-                print("User packages:")
-                for pkg in global_packages:
-                    _format_pkg(pkg, "user")
-            if project_packages:
-                if global_packages:
-                    print()
-                print("Project packages:")
-                for pkg in project_packages:
-                    _format_pkg(pkg, "project")
-            return True, 0
-
-        await package_manager.update(source)
-        if source:
-            print(f"Updated {source}")
-        else:
-            print("Updated packages")
-        return True, 0
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return True, 1
+    return await run_package_command(list(args))
 
 
 async def _handle_config_command(args: Sequence[str]) -> tuple[bool, int]:
-    if not args or args[0] != "config":
-        return False, 0
-    cwd = os.getcwd()
-    settings_manager = SettingsManager.create(cwd, get_agent_dir())
-    _report_settings_errors(settings_manager, "config command")
-    package_manager = DefaultPackageManager(cwd=cwd, agent_dir=get_agent_dir(), settings_manager=settings_manager)
-    resolved = await package_manager.resolve()
-
-    print("Resolved package resources:")
-    for label, entries in (
-        ("extensions", resolved.extensions),
-        ("skills", resolved.skills),
-        ("prompts", resolved.prompts),
-        ("themes", resolved.themes),
-    ):
-        print(f"- {label}: {len(entries)}")
-    return True, 0
+    return await run_config_command(list(args))
 
 
 async def _run(args: Sequence[str]) -> int:
@@ -350,17 +251,13 @@ async def _run(args: Sequence[str]) -> int:
     if parsed.session and session_manager is None:
         return 1
 
-    opts = CreateAgentSessionOptions(
+    opts = _create_session_options(
+        parsed,
         cwd=cwd,
-        model_id=parsed.model,
-        provider=parsed.provider,
-        api_key=parsed.api_key,
-        thinking_level=parsed.thinking or (settings_manager.get_default_thinking_level() or "off"),
-        auto_compact=not parsed.no_session,
-        sessions_dir=parsed.session_dir,
         session_manager=session_manager,
         auth_storage=auth_storage,
         model_registry=model_registry,
+        settings_manager=settings_manager,
     )
     result = await create_agent_session(opts)
     session = result.session
@@ -409,17 +306,13 @@ async def _run(args: Sequence[str]) -> int:
             return 0
         sm = SessionManager.open(selected, parsed.session_dir)
         result = await create_agent_session(
-            CreateAgentSessionOptions(
+            _create_session_options(
+                parsed,
                 cwd=cwd,
-                model_id=parsed.model,
-                provider=parsed.provider,
-                api_key=parsed.api_key,
-                thinking_level=parsed.thinking or "off",
-                auto_compact=not parsed.no_session,
-                sessions_dir=parsed.session_dir,
                 session_manager=sm,
                 auth_storage=auth_storage,
                 model_registry=model_registry,
+                settings_manager=settings_manager,
             )
         )
         session = result.session
